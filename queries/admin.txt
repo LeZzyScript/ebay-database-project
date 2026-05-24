@@ -1,0 +1,4 @@
+INSERT INTO User (User_ID, User_FName, User_LName, User_AccName, User_Email, User_Password, User_Contact, User_Address, User_DateReg, User_AccType, User_Status)
+VALUES ('USER0000', 'Kyth', 'Carael', 'admin', 'admin@ebay.com', '$2y$10$aBa86xkrDes9vekpPESkc.H9koeFFtVLxZ87X2hkZxa.RCIzZ9BA2', '09123456789', '123 Admin St, Cebu City', CURDATE(), 'admin', 'active');
+INSERT INTO Admin (Admin_ID, Admin_UserID, Admin_Level, Admin_Perm, Admin_LastLog)
+VALUES ('ADMN0001', 'USER0000', 1, 'full', NOW());

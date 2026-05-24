@@ -1,0 +1,27 @@
+INSERT INTO User VALUES
+('USER0001', 'Kyth', 'Carael', 'kythseller', 'seller@gmail.com', '$2y$10$D9UNN6XlAKgBmWWR6DXhHu215J.8pTHH20OgaUN72RrYFxxr7L1.K', '09123456789', '123 Seller St, Metro Manila', CURDATE(), 'individual', 'active');
+
+INSERT INTO Seller VALUES
+('SELL0001', 'USER0001', 'individual', 5, 'active', CURDATE());
+
+INSERT INTO Product (Prod_ID, Prod_SellID, Prod_CatID, Prod_Title, Prod_Desc, Prod_Price, Prod_Image, Prod_Stock, Prod_DateAdd) VALUES
+('PROD0001', 'SELL0001', 'CATG0001', 'Sony WH-1000XM4 Noise Canceling Headphones', 'Industry leading noise canceling overhead headphones.', 18500.00, 'https://images.unsplash.com/photo-1618366712010-f4ae9c647dcb?w=500&q=80', 10, '2026-05-17'),
+('PROD0002', 'SELL0001', 'CATG0001', 'Apple MacBook Air M2 256GB', 'Supercharged by M2. Midnight color.', 65000.00, 'https://images.unsplash.com/photo-1611186871348-b1ce696e52c9?w=500&q=80', 5, '2026-05-17'),
+('PROD0003', 'SELL0001', 'CATG0002', 'Men''s Vintage Denim Jacket', 'Classic fit blue denim jacket, lightly distressed.', 1250.00, 'https://images.unsplash.com/photo-1576871337622-98d48d1cf531?w=500&q=80', 15, '2026-05-17'),
+('PROD0004', 'SELL0001', 'CATG0002', 'Nike Air Force 1 ''07 Men''s Shoes', 'The radiance lives on in the Nike Air Force 1.', 4500.00, 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=500&q=80', 8, '2026-05-17'),
+('PROD0005', 'SELL0001', 'CATG0003', 'Ceramic Indoor Planter Pot', 'Minimalist white ceramic pot for indoor plants.', 450.00, 'https://images.unsplash.com/photo-1485955900006-10f4d324d411?w=500&q=80', 30, '2026-05-17'),
+('PROD0006', 'SELL0001', 'CATG0004', 'MOMO Racing Steering Wheel 350mm', 'Genuine MOMO racing wheel, black leather with red stitching.', 8499.00, 'https://images.unsplash.com/photo-1580273916550-e323be2ae537?w=500&q=80', 3, '2026-05-17'),
+('PROD0007', 'SELL0001', 'CATG0005', 'Sony PlayStation 5 DualSense Controller', 'Discover a deeper, highly immersive gaming experience.', 3200.00, 'https://images.unsplash.com/photo-1596944924616-7b38e7cfac36?w=500&q=80', 20, '2026-05-17'),
+('PROD0008', 'SELL0001', 'CATG0006', 'Sterling Silver Minimalist Ring', 'Handcrafted 925 sterling silver band.', 850.00, 'https://images.unsplash.com/photo-1605100804763-247f6612d54e?w=500&q=80', 12, '2026-05-17'),
+('PROD0009', 'SELL0001', 'CATG0007', 'Atomic Habits by James Clear', 'An Easy & Proven Way to Build Good Habits & Break Bad Ones.', 650.00, 'https://images.unsplash.com/photo-1589829085413-56de8ae18c73?w=500&q=80', 50, '2026-05-17'),
+('PROD0010', 'SELL0001', 'CATG0008', 'Spalding Indoor/Outdoor Basketball', 'Official size and weight, premium composite cover.', 1200.00, 'https://images.unsplash.com/photo-1519861531473-9200262188bf?w=500&q=80', 18, '2026-05-17'),
+('PROD0011', 'SELL0001', 'CATG0009', 'Lego Star Wars Millennium Falcon', 'Classic Star Wars ship building kit.', 7500.00, 'https://images.unsplash.com/photo-1585366119957-e9730b6d0f60?w=500&q=80', 4, '2026-05-17'),
+('PROD0012', 'SELL0001', 'CATG0010', '1921 Morgan Silver Dollar Rare Coin', 'Authentic vintage US silver dollar in great condition.', 2500.00, 'https://i.ebayimg.com/images/g/1LsAAOSwg-RmtoHO/s-l1600.webp', 1, '2026-05-17'),
+('PROD0013', 'SELL0001', 'CATG0011', 'Ergonomic Office Chair', 'High back mesh chair with adjustable lumbar support.', 4500.00, 'https://images.unsplash.com/photo-1505843490538-5133c6c7d0e1?w=500&q=80', 10, '2026-05-17'),
+('PROD0014', 'SELL0001', 'CATG0012', 'Cerave Hydrating Facial Cleanser', 'Gentle face wash with hyaluronic acid and ceramides.', 750.00, 'https://images.unsplash.com/photo-1629198688000-71f23e745b6e?w=500&q=80', 40, '2026-05-17'),
+('PROD0015', 'SELL0001', 'CATG0001', 'Samsung Galaxy S23 Ultra 256GB', 'Unlocked Android smartphone with S Pen.', 52000.00, 'https://images.unsplash.com/photo-1678911820864-e2c567c655d7?w=500&q=80', 6, '2026-05-17'),
+('PROD0016', 'SELL0001', 'CATG0002', 'Ray-Ban Classic Aviator Sunglasses', 'Gold frame, green lenses. Timeless design.', 5500.00, 'https://images.unsplash.com/photo-1511499767150-a48a237f0083?w=500&q=80', 15, '2026-05-17'),
+('PROD0017', 'SELL0001', 'CATG0003', 'Dyson V15 Detect Cordless Vacuum', 'Powerful intelligent cordless vacuum with laser illumination.', 32000.00, 'https://images.unsplash.com/photo-1558317374-067fb5f30001?w=500&q=80', 2, '2026-05-17'),
+('PROD0018', 'SELL0001', 'CATG0005', 'Nintendo Switch OLED Model', 'Play at home or on the go with a vibrant 7-inch OLED screen.', 16500.00, 'https://i.ebayimg.com/images/g/0IEAAeSwa2BqBft1/s-l1600.webp', 10, '2026-05-17'),
+('PROD0019', 'SELL0001', 'CATG0001', 'Canon EOS R5 Mirrorless Camera', 'Professional full-frame camera for stunning photos.', 195000.00, 'https://images.unsplash.com/photo-1516035069371-29a1b244cc32?w=500&q=80', 1, '2026-05-17'),
+('PROD0020', 'SELL0001', 'CATG0002', 'Casio G-Shock Matte Black Watch', 'Rugged, water-resistant digital watch.', 4200.00, 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=500&q=80', 22, '2026-05-17');

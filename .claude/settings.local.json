@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path . -Filter \"*.php\" -Recurse)",
+      "Bash(Select-Object -ExpandProperty FullName)"
+    ]
+  }
+}

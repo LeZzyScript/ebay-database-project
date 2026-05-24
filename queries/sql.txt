@@ -1,0 +1,233 @@
+-- eBay Philippines Database Setup
+-- Run this script to create and seed the database
+
+CREATE DATABASE IF NOT EXISTS ebayph;
+USE ebayph;
+
+-- Users Table
+CREATE TABLE IF NOT EXISTS User (
+    User_ID     CHAR(8) PRIMARY KEY,
+    User_FName  VARCHAR(30) NOT NULL,
+    User_LName  VARCHAR(30) NOT NULL,
+    User_AccName VARCHAR(30) NOT NULL UNIQUE,
+    User_Email  VARCHAR(50) NOT NULL UNIQUE,
+    User_Password VARCHAR(255) NOT NULL,
+    User_Contact CHAR(11) NOT NULL,
+    User_Address VARCHAR(100) NOT NULL,
+    User_DateReg DATE NOT NULL,
+    User_AccType ENUM('buyer','seller','admin') NOT NULL DEFAULT 'buyer',
+    User_Status  ENUM('active','suspended') NOT NULL DEFAULT 'active'
+);
+
+-- Seller Table
+CREATE TABLE IF NOT EXISTS Seller (
+    Sell_ID     CHAR(8) PRIMARY KEY,
+    Sell_UserID CHAR(8) NOT NULL,
+    Sell_Type   VARCHAR(20) NOT NULL,
+    Sell_FeeRate DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+    Sell_Status  VARCHAR(10) NOT NULL DEFAULT 'Active',
+    Sell_JoinDate DATE NOT NULL,
+    FOREIGN KEY (Sell_UserID) REFERENCES User(User_ID) ON DELETE CASCADE
+);
+
+-- Business Table
+CREATE TABLE IF NOT EXISTS Business (
+    Bus_ID      CHAR(8) PRIMARY KEY,
+    Bus_SellID  CHAR(8) NOT NULL,
+    Bus_Name    VARCHAR(100) NOT NULL,
+    Bus_TaxID   VARCHAR(30) NOT NULL,
+    Bus_RegNum  VARCHAR(30) NOT NULL,
+    Bus_Verified TINYINT(1) NOT NULL DEFAULT 0,
+    Bus_VerDate  DATE,
+    Bus_Type    VARCHAR(30) NOT NULL,
+    Bus_Phone   CHAR(11) NOT NULL,
+    Bus_Address VARCHAR(100) NOT NULL,
+    FOREIGN KEY (Bus_SellID) REFERENCES Seller(Sell_ID) ON DELETE CASCADE
+);
+
+-- Category Table
+CREATE TABLE IF NOT EXISTS Category (
+    Cat_ID CHAR(8) PRIMARY KEY,
+    Cat_Name VARCHAR(50) NOT NULL UNIQUE,
+    Cat_Icon VARCHAR(50) DEFAULT 'bi-tag',
+    Cat_Description VARCHAR(255),
+    Cat_Status ENUM('active', 'inactive') DEFAULT 'active'
+);
+
+
+-- Product Table
+CREATE TABLE IF NOT EXISTS Product (
+    Prod_ID     CHAR(8) PRIMARY KEY,
+    Prod_SellID CHAR(8) NOT NULL,
+    Prod_CatID  CHAR(8),
+    Prod_Title  VARCHAR(100) NOT NULL,
+    Prod_Desc   VARCHAR(255) NOT NULL,
+    Prod_Price  DECIMAL(10,2) NOT NULL,
+    Prod_Image  VARCHAR(255) DEFAULT NULL,
+    Prod_Stock  INT NOT NULL DEFAULT 0,
+    Prod_Status VARCHAR(10) NOT NULL DEFAULT 'active',
+    Prod_DateAdd DATE NOT NULL,
+    Prod_DateUpd DATE,
+    FOREIGN KEY (Prod_SellID) REFERENCES Seller(Sell_ID) ON DELETE CASCADE,
+    FOREIGN KEY (Prod_CatID) REFERENCES Category(Cat_ID) ON DELETE CASCADE
+);
+
+-- Auction Table
+CREATE TABLE IF NOT EXISTS Auction (
+    Auc_ID      CHAR(8) PRIMARY KEY,
+    Auc_ProdID  CHAR(8) NOT NULL,
+    Auc_StartPrice DECIMAL(10,2) NOT NULL,
+    Auc_HighBid  DECIMAL(10,2),
+    Auc_StartDate DATETIME NOT NULL,
+    Auc_EndDate  DATETIME NOT NULL,
+    Auc_Status   VARCHAR(10) NOT NULL DEFAULT 'Active',
+    FOREIGN KEY (Auc_ProdID) REFERENCES Product(Prod_ID) ON DELETE CASCADE
+);
+
+-- Bid Table
+CREATE TABLE IF NOT EXISTS Bid (
+    Bid_ID      CHAR(8) PRIMARY KEY,
+    Bid_AucID   CHAR(8) NOT NULL,
+    Bid_UserID  CHAR(8) NOT NULL,
+    Bid_Amount  DECIMAL(10,2) NOT NULL,
+    Bid_Date    DATETIME NOT NULL,
+    FOREIGN KEY (Bid_AucID) REFERENCES Auction(Auc_ID) ON DELETE CASCADE,
+    FOREIGN KEY (Bid_UserID) REFERENCES User(User_ID) ON DELETE CASCADE
+);
+
+
+-- Cart Table
+CREATE TABLE IF NOT EXISTS Cart (
+    Cart_UserID CHAR(8) NOT NULL,
+    Cart_ProdID CHAR(8) NOT NULL,
+    Cart_Qty    INT NOT NULL DEFAULT 1,
+    Cart_DateAdd DATE NOT NULL,
+    Cart_DateUpd DATE,
+    PRIMARY KEY (Cart_UserID, Cart_ProdID),
+    FOREIGN KEY (Cart_UserID) REFERENCES User(User_ID) ON DELETE CASCADE,
+    FOREIGN KEY (Cart_ProdID) REFERENCES Product(Prod_ID) ON DELETE CASCADE
+);
+
+-- Wishlist Table
+CREATE TABLE IF NOT EXISTS Wishlist (
+    Wish_UserID CHAR(8) NOT NULL,
+    Wish_ProdID CHAR(8) NOT NULL,
+    Wish_DateAdd DATE NOT NULL,
+    Wish_PriceAdd DECIMAL(10,2) NOT NULL,
+    Wish_Notified TINYINT(1) NOT NULL DEFAULT 0,
+    PRIMARY KEY (Wish_UserID, Wish_ProdID),
+    FOREIGN KEY (Wish_UserID) REFERENCES User(User_ID) ON DELETE CASCADE,
+    FOREIGN KEY (Wish_ProdID) REFERENCES Product(Prod_ID) ON DELETE CASCADE
+);
+
+-- Order Table
+CREATE TABLE IF NOT EXISTS `Order` (
+    Order_ID    CHAR(8) PRIMARY KEY,
+    Order_UserID CHAR(8) NOT NULL,
+    Order_Date  DATE NOT NULL,
+    Order_Total  DECIMAL(10,2) NOT NULL,
+    Order_PayStat VARCHAR(20) NOT NULL DEFAULT 'Pending',
+    Order_ShipAdd VARCHAR(100) NOT NULL,
+    Order_TrackNum VARCHAR(30),
+    FOREIGN KEY (Order_UserID) REFERENCES User(User_ID) ON DELETE CASCADE
+);
+
+-- Order Item Table
+CREATE TABLE IF NOT EXISTS OrderItem (
+    Item_ID     CHAR(8) PRIMARY KEY,
+    Item_OrderID CHAR(8) NOT NULL,
+    Item_ProdID  CHAR(8) NOT NULL,
+    Item_Qty    INT NOT NULL,
+    Item_Price  DECIMAL(10,2) NOT NULL,
+    Item_Sub    DECIMAL(10,2) NOT NULL,
+    FOREIGN KEY (Item_OrderID) REFERENCES `Order`(Order_ID) ON DELETE CASCADE,
+    FOREIGN KEY (Item_ProdID) REFERENCES Product(Prod_ID) ON DELETE CASCADE
+);
+
+-- Shipment Table
+CREATE TABLE IF NOT EXISTS Shipment (
+    Ship_ID     CHAR(8) PRIMARY KEY,
+    Ship_OrderID CHAR(8) NOT NULL,
+    Ship_Status  VARCHAR(20) NOT NULL DEFAULT 'Shipped',
+    Ship_PickupDate DATE,
+    Ship_TransitDate DATE,
+    Ship_DelivDate DATE,
+    Ship_Location VARCHAR(100),
+    FOREIGN KEY (Ship_OrderID) REFERENCES `Order`(Order_ID) ON DELETE CASCADE
+);
+
+-- Feedback Table
+CREATE TABLE IF NOT EXISTS Feedback (
+    Feed_ID     CHAR(8) PRIMARY KEY,
+    Feed_OrderID CHAR(8) NOT NULL,
+    Feed_SellID  CHAR(8) NOT NULL,
+    Feed_UserID  CHAR(8) NOT NULL,
+    Feed_Rating  INT NOT NULL,
+    Feed_Comment VARCHAR(200),
+    Feed_Date   DATE NOT NULL,
+    FOREIGN KEY (Feed_OrderID) REFERENCES `Order`(Order_ID) ON DELETE CASCADE,
+    FOREIGN KEY (Feed_SellID) REFERENCES Seller(Sell_ID) ON DELETE CASCADE,
+    FOREIGN KEY (Feed_UserID) REFERENCES User(User_ID) ON DELETE CASCADE
+);
+
+-- Admin Table
+CREATE TABLE IF NOT EXISTS Admin (
+    Admin_ID    CHAR(8) PRIMARY KEY,
+    Admin_UserID CHAR(8) NOT NULL,
+    Admin_Level  INT NOT NULL DEFAULT 1,
+    Admin_Perm  VARCHAR(100) NOT NULL,
+    Admin_LastLog DATETIME,
+    FOREIGN KEY (Admin_UserID) REFERENCES User(User_ID) ON DELETE CASCADE
+);
+
+INSERT INTO User (User_ID, User_FName, User_LName, User_AccName, User_Email, User_Password, User_Contact, User_Address, User_DateReg, User_AccType, User_Status)
+VALUES ('USER0000', 'Kyth', 'Carael', 'admin', 'admin@ebay.com', '$2y$10$aBa86xkrDes9vekpPESkc.H9koeFFtVLxZ87X2hkZxa.RCIzZ9BA2', '09123456789', '123 Admin St, Cebu City', CURDATE(), 'admin', 'active');
+
+INSERT INTO Admin (Admin_ID, Admin_UserID, Admin_Level, Admin_Perm, Admin_LastLog)
+VALUES ('ADMN0001', 'USER0000', 1, 'full', NOW());
+
+INSERT INTO Category (Cat_ID, Cat_Name, Cat_Icon, Cat_Description, Cat_Status) VALUES
+('CATG0001', 'Electronics', 'bi-phone', 'Phones, laptops, tablets and more', 'active'),
+('CATG0002', 'Clothing & shoes', 'bi-handbag', 'Brand-name clothing, shoes and accessories', 'active'),
+('CATG0003', 'Home & garden', 'bi-house-door', 'Furniture, decor, gardening tools', 'active'),
+('CATG0004', 'Motors', 'bi-car-front', 'Vehicle parts and accessories', 'active'),
+('CATG0005', 'Video games', 'bi-joystick', 'Games, consoles, gaming accessories', 'active'),
+('CATG0006', 'Jewelry & watches', 'bi-gem', 'Fine jewelry, luxury watches', 'active'),
+('CATG0007', 'Books', 'bi-book', 'Fiction, non-fiction, rare books', 'active'),
+('CATG0008', 'Sporting goods', 'bi-trophy', 'Sports equipment and gear', 'active'),
+('CATG0009', 'Toys', 'bi-dice-6', 'Action figures, board games, collectible toys', 'active'),
+('CATG0010', 'Collectibles & art', 'bi-collection', 'Rare cards, coins, vintage items, art', 'active'),
+('CATG0011', 'Business & industrial', 'bi-briefcase', 'Office supplies, industrial equipment', 'active'),
+('CATG0012', 'Health & beauty', 'bi-heart-pulse', 'Wellness products, cosmetics, skincare', 'active');
+
+INSERT INTO User VALUES
+('USER0001', 'Kyth', 'Carael', 'kythseller', 'seller@gmail.com', '$2y$10$D9UNN6XlAKgBmWWR6DXhHu215J.8pTHH20OgaUN72RrYFxxr7L1.K', '09123456789', '123 Seller St, Metro Manila', CURDATE(), 'seller', 'active');
+
+INSERT INTO Seller VALUES
+('SELL0001', 'USER0001', 'seller', 5, 'active', CURDATE());
+
+INSERT INTO Business (Bus_ID, Bus_SellID, Bus_Name, Bus_TaxID, Bus_RegNum, Bus_Verified, Bus_VerDate, Bus_Type, Bus_Phone, Bus_Address)
+VALUES ('BUS0001', 'SELL0001', 'Kyth Business', '123456789012', '123456789012', 1, NULL, 'Corporation', '09123456789', '123 Seller St, Cebu City');
+
+
+INSERT INTO Product (Prod_ID, Prod_SellID, Prod_CatID, Prod_Title, Prod_Desc, Prod_Price, Prod_Image, Prod_Stock, Prod_DateAdd) VALUES
+('PROD0001', 'SELL0001', 'CATG0001', 'Sony WH-1000XM4 Noise Canceling Headphones', 'Industry leading noise canceling overhead headphones.', 18500.00, 'https://images.unsplash.com/photo-1618366712010-f4ae9c647dcb?w=500&q=80', 10, '2026-05-17'),
+('PROD0002', 'SELL0001', 'CATG0001', 'Apple MacBook Air M2 256GB', 'Supercharged by M2. Midnight color.', 65000.00, 'https://images.unsplash.com/photo-1611186871348-b1ce696e52c9?w=500&q=80', 5, '2026-05-17'),
+('PROD0003', 'SELL0001', 'CATG0002', 'Men''s Vintage Denim Jacket', 'Classic fit blue denim jacket, lightly distressed.', 1250.00, 'https://images.unsplash.com/photo-1576871337622-98d48d1cf531?w=500&q=80', 15, '2026-05-17'),
+('PROD0004', 'SELL0001', 'CATG0002', 'Nike Air Force 1 ''07 Men''s Shoes', 'The radiance lives on in the Nike Air Force 1.', 4500.00, 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=500&q=80', 8, '2026-05-17'),
+('PROD0005', 'SELL0001', 'CATG0003', 'Ceramic Indoor Planter Pot', 'Minimalist white ceramic pot for indoor plants.', 450.00, 'https://images.unsplash.com/photo-1485955900006-10f4d324d411?w=500&q=80', 30, '2026-05-17'),
+('PROD0006', 'SELL0001', 'CATG0004', 'MOMO Racing Steering Wheel 350mm', 'Genuine MOMO racing wheel, black leather with red stitching.', 8499.00, 'https://images.unsplash.com/photo-1580273916550-e323be2ae537?w=500&q=80', 3, '2026-05-17'),
+('PROD0007', 'SELL0001', 'CATG0005', 'Sony PlayStation 5 DualSense Controller', 'Discover a deeper, highly immersive gaming experience.', 3200.00, 'https://images.unsplash.com/photo-1596944924616-7b38e7cfac36?w=500&q=80', 20, '2026-05-17'),
+('PROD0008', 'SELL0001', 'CATG0006', 'Sterling Silver Minimalist Ring', 'Handcrafted 925 sterling silver band.', 850.00, 'https://encrypted-tbn1.gstatic.com/shopping?q=tbn:ANd9GcSP3m-KpXJAfwqve41TdYcJvP4bxiFSRERYgFI6H2YUt_nLxNFYvMJwsphHZ4ArB-Az3F6_vclQJ3ec0ndDcQZ4a19VmE1cFg', 12, '2026-05-17'),
+('PROD0009', 'SELL0001', 'CATG0007', 'Atomic Habits by James Clear', 'An Easy & Proven Way to Build Good Habits & Break Bad Ones.', 650.00, 'https://images.unsplash.com/photo-1589829085413-56de8ae18c73?w=500&q=80', 50, '2026-05-17'),
+('PROD0010', 'SELL0001', 'CATG0008', 'Spalding Indoor/Outdoor Basketball', 'Official size and weight, premium composite cover.', 1200.00, 'https://images.unsplash.com/photo-1519861531473-9200262188bf?w=500&q=80', 18, '2026-05-17'),
+('PROD0011', 'SELL0001', 'CATG0009', 'Lego Star Wars Millennium Falcon', 'Classic Star Wars ship building kit.', 7500.00, 'https://images.unsplash.com/photo-1585366119957-e9730b6d0f60?w=500&q=80', 4, '2026-05-17'),
+('PROD0012', 'SELL0001', 'CATG0010', '1921 Morgan Silver Dollar Rare Coin', 'Authentic vintage US silver dollar in great condition.', 2500.00, 'https://i.ebayimg.com/images/g/1LsAAOSwg-RmtoHO/s-l1600.webp', 1, '2026-05-17'),
+('PROD0013', 'SELL0001', 'CATG0011', 'Ergonomic Office Chair', 'High back mesh chair with adjustable lumbar support.', 4500.00, 'https://images.unsplash.com/photo-1505843490538-5133c6c7d0e1?w=500&q=80', 10, '2026-05-17'),
+('PROD0014', 'SELL0001', 'CATG0012', 'Cerave Hydrating Facial Cleanser', 'Gentle face wash with hyaluronic acid and ceramides.', 750.00, 'https://images.unsplash.com/photo-1629198688000-71f23e745b6e?w=500&q=80', 40, '2026-05-17'),
+('PROD0015', 'SELL0001', 'CATG0001', 'Samsung Galaxy S23 Ultra 256GB', 'Unlocked Android smartphone with S Pen.', 52000.00, 'https://images.unsplash.com/photo-1678911820864-e2c567c655d7?w=500&q=80', 6, '2026-05-17'),
+('PROD0016', 'SELL0001', 'CATG0002', 'Ray-Ban Classic Aviator Sunglasses', 'Gold frame, green lenses. Timeless design.', 5500.00, 'https://images.unsplash.com/photo-1511499767150-a48a237f0083?w=500&q=80', 15, '2026-05-17'),
+('PROD0017', 'SELL0001', 'CATG0003', 'Dyson V15 Detect Cordless Vacuum', 'Powerful intelligent cordless vacuum with laser illumination.', 32000.00, 'https://images.unsplash.com/photo-1558317374-067fb5f30001?w=500&q=80', 2, '2026-05-17'),
+('PROD0018', 'SELL0001', 'CATG0005', 'Nintendo Switch OLED Model', 'Play at home or on the go with a vibrant 7-inch OLED screen.', 16500.00, 'https://i.ebayimg.com/images/g/0IEAAeSwa2BqBft1/s-l1600.webp', 10, '2026-05-17'),
+('PROD0019', 'SELL0001', 'CATG0001', 'Canon EOS R5 Mirrorless Camera', 'Professional full-frame camera for stunning photos.', 195000.00, 'https://images.unsplash.com/photo-1516035069371-29a1b244cc32?w=500&q=80', 1, '2026-05-17'),
+('PROD0020', 'SELL0001', 'CATG0002', 'Casio G-Shock Matte Black Watch', 'Rugged, water-resistant digital watch.', 4200.00, 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=500&q=80', 22, '2026-05-17');
