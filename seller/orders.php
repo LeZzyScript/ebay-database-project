@@ -1,25 +1,13 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id']) || empty($_SESSION['is_seller'])) {
+if (!isset($_SESSION['firebase_uid']) || empty($_SESSION['is_seller'])) {
     header('Location: ../buyer/dashboard.php');
     exit;
 }
 
-require_once('../config/db.php');
-$userId = $_SESSION['account_id'];
+require_once('../config/firebase.php');
 
-// Resolve Sell_ID
-$sellId = null;
-$s = $conn->prepare("SELECT Sell_ID FROM Seller WHERE Sell_UserID = ?");
-$s->bind_param("s", $userId);
-$s->execute();
-if ($row = $s->get_result()->fetch_assoc()) $sellId = $row['Sell_ID'];
-$s->close();
-
-if (!$sellId) {
-    header('Location: dashboard.php');
-    exit;
-}
+$uid = $_SESSION['firebase_uid'];
 
 // Process Accept/Reject
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'], $_POST['order_id'])) {
@@ -27,37 +15,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'], $_POST['ord
     $oid = $_POST['order_id'];
     
     // Verify the order belongs to this seller by checking if they have items in it
-    $verifyStmt = $conn->prepare("
-        SELECT 1 FROM `Order` o
-        JOIN OrderItem oi ON o.Order_ID = oi.Item_OrderID
-        JOIN Product p ON oi.Item_ProdID = p.Prod_ID
-        WHERE o.Order_ID = ? AND p.Prod_SellID = ?
-        LIMIT 1
-    ");
-    $verifyStmt->bind_param("ss", $oid, $sellId);
-    $verifyStmt->execute();
-    $valid = $verifyStmt->get_result()->num_rows > 0;
-    $verifyStmt->close();
+    $order = getData("orders/{$oid}");
+    $valid = false;
+    if ($order) {
+        $orderItems = getData("orders/{$oid}/items");
+        if ($orderItems) {
+            foreach ($orderItems as $itemId => $itemData) {
+                $productId = $itemData['productId'] ?? '';
+                $product = getData("products/{$productId}");
+                if ($product && ($product['sellerId'] ?? '') === $uid) {
+                    $valid = true;
+                    break;
+                }
+            }
+        }
+    }
     
     if ($valid) {
         if ($action === 'accept') {
-            $conn->query("UPDATE `Order` SET Order_ReqStatus = 'Accepted' WHERE Order_ID = '$oid'");
-            // Generate Shipment
-            $shipId = strtoupper(substr(md5(uniqid(mt_rand(), true)), 0, 8));
-            $days = rand(5, 7);
-            $orderDate = $conn->query("SELECT Order_Date FROM `Order` WHERE Order_ID = '$oid'")->fetch_assoc()['Order_Date'] ?? date('Y-m-d');
-            
-            $pickup = date('Y-m-d', strtotime($orderDate . ' + 1 days'));
-            $transit = date('Y-m-d', strtotime($orderDate . ' + 2 days'));
-            $deliv = date('Y-m-d', strtotime($orderDate . " + $days days"));
-            
-            $stmtS = $conn->prepare("INSERT INTO Shipment (Ship_ID, Ship_OrderID, Ship_Status, Ship_PickupDate, Ship_TransitDate, Ship_DelivDate, Ship_Location) VALUES (?, ?, 'Processing', ?, ?, ?, 'Warehouse')");
-            $stmtS->bind_param("sssss", $shipId, $oid, $pickup, $transit, $deliv);
-            $stmtS->execute();
-            $stmtS->close();
-            $_SESSION['flash'] = "Order accepted and shipment created.";
+            updateData("orders/{$oid}/status", 'Processing');
+            $_SESSION['flash'] = "Order accepted.";
         } elseif ($action === 'reject') {
-            $conn->query("UPDATE `Order` SET Order_ReqStatus = 'Rejected' WHERE Order_ID = '$oid'");
+            updateData("orders/{$oid}/status", 'Rejected');
             $_SESSION['flash'] = "Order rejected.";
         }
     }
@@ -65,64 +44,110 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'], $_POST['ord
     exit;
 }
 
-// Advance shipment statuses based on dates
-$today = date('Y-m-d');
-$conn->query("UPDATE Shipment SET Ship_Status = 'Delivered' WHERE Ship_Status != 'Delivered' AND Ship_DelivDate <= '$today'");
-$conn->query("UPDATE Shipment SET Ship_Status = 'In Transit' WHERE Ship_Status IN ('Processing', 'Picked Up') AND Ship_TransitDate <= '$today' AND Ship_DelivDate > '$today'");
-$conn->query("UPDATE Shipment SET Ship_Status = 'Picked Up' WHERE Ship_Status = 'Processing' AND Ship_PickupDate <= '$today' AND Ship_TransitDate > '$today'");
-
 // Fetch all orders that contain this seller's products
 $orders = [];
-$stmt = $conn->prepare("
-    SELECT o.Order_ID, o.Order_Date, o.Order_PayStat, o.Order_ShipAdd, o.Order_ReqStatus,
-           u.User_FName, u.User_LName, u.User_AccName, u.User_Contact,
-           sh.Ship_ID, sh.Ship_Status,
-           sh.Ship_PickupDate, sh.Ship_TransitDate, sh.Ship_DelivDate, sh.Ship_Location,
-           SUM(oi.Item_Sub)   AS Seller_Subtotal,
-           SUM(oi.Item_Qty)   AS Seller_TotalQty
-    FROM `Order` o
-    JOIN OrderItem oi ON o.Order_ID   = oi.Item_OrderID
-    JOIN Product   p  ON oi.Item_ProdID = p.Prod_ID
-    JOIN User      u  ON o.Order_UserID = u.User_ID
-    LEFT JOIN Shipment sh ON o.Order_ID = sh.Ship_OrderID
-    WHERE p.Prod_SellID = ?
-    GROUP BY o.Order_ID, o.Order_Date, o.Order_PayStat, o.Order_ShipAdd, o.Order_ReqStatus,
-             u.User_FName, u.User_LName, u.User_AccName, u.User_Contact,
-             sh.Ship_ID, sh.Ship_Status,
-             sh.Ship_PickupDate, sh.Ship_TransitDate, sh.Ship_DelivDate, sh.Ship_Location
-    ORDER BY o.Order_Date DESC
-");
-$stmt->bind_param("s", $sellId);
-$stmt->execute();
-$res = $stmt->get_result();
-while ($row = $res->fetch_assoc()) $orders[] = $row;
-$stmt->close();
+$ordersData = getData('orders');
+if ($ordersData) {
+    foreach ($ordersData as $orderId => $orderData) {
+        $status = $orderData['status'] ?? 'Processing';
+        if ($status === 'Rejected') {
+            continue;
+        }
+        $orderItems = getData("orders/{$orderId}/items");
+        if ($orderItems) {
+            $hasSellerItem = false;
+            $sellerSubtotal = 0;
+            $sellerTotalQty = 0;
+            
+            foreach ($orderItems as $itemId => $itemData) {
+                $productId = $itemData['productId'] ?? '';
+                $product = getData("products/{$productId}");
+                if ($product && ($product['sellerId'] ?? '') === $uid) {
+                    $hasSellerItem = true;
+                    $sellerSubtotal += ($itemData['subtotal'] ?? 0);
+                    $sellerTotalQty += ($itemData['quantity'] ?? 0);
+                }
+            }
+            
+            if ($hasSellerItem) {
+                // Get buyer info
+                $buyerUid = $orderData['userId'] ?? '';
+                $buyerUser = getData("users/{$buyerUid}");
+                $buyerProfile = $buyerUser['profile'] ?? [];
+                
+                // Calculate shipment dates based on order date
+                $orderDate = $orderData['date'] ?? date('Y-m-d');
+                $orderDateObj = new DateTime($orderDate);
+                $pickupDate = clone $orderDateObj;
+                $pickupDate->modify('+2 days');
+                $transitDate = clone $pickupDate;
+                $transitDate->modify('+3 days');
+                $deliveryDate = clone $transitDate;
+                $deliveryDate->modify('+2 days');
+                
+                // Map order status to shipment status
+                $status = $orderData['status'] ?? 'Processing';
+                $shipStatus = 'Processing';
+                if ($status === 'Shipped') {
+                    $shipStatus = 'In Transit';
+                } elseif ($status === 'Delivered') {
+                    $shipStatus = 'Delivered';
+                }
+                
+                $orders[] = [
+                    'Order_ID' => $orderId,
+                    'Order_Date' => $orderDate,
+                    'Order_PayStat' => $orderData['paymentStatus'] ?? 'Paid',
+                    'Order_ShipAdd' => $orderData['shippingAddress'] ?? '',
+                    'Order_ReqStatus' => ($status === 'Pending') ? 'Pending' : (($status === 'Rejected') ? 'Rejected' : 'Approved'),
+                    'User_FName' => $buyerProfile['firstName'] ?? '',
+                    'User_LName' => $buyerProfile['lastName'] ?? '',
+                    'User_AccName' => $buyerProfile['accountName'] ?? '',
+                    'User_Contact' => $buyerProfile['contact'] ?? '',
+                    'Ship_ID' => ($status !== 'Pending' && $status !== 'Rejected') ? $orderId : null,
+                    'Ship_Status' => $shipStatus,
+                    'Ship_PickupDate' => $pickupDate->format('Y-m-d'),
+                    'Ship_TransitDate' => $transitDate->format('Y-m-d'),
+                    'Ship_DelivDate' => $deliveryDate->format('Y-m-d'),
+                    'Ship_Location' => $shipStatus === 'Delivered' ? 'Delivered' : 'Philippines',
+                    'Seller_Subtotal' => $sellerSubtotal,
+                    'Seller_TotalQty' => $sellerTotalQty
+                ];
+            }
+        }
+    }
+}
+
+// Sort by date descending
+usort($orders, function($a, $b) {
+    return strtotime($b['Order_Date']) - strtotime($a['Order_Date']);
+});
 
 // Fetch items per order (only this seller's products)
 $orderItems = [];
 if (!empty($orders)) {
-    $orderIds    = array_column($orders, 'Order_ID');
-    $placeholders = implode(',', array_fill(0, count($orderIds), '?'));
-    $types        = str_repeat('s', count($orderIds) + 1);
-    $stmtI = $conn->prepare("
-        SELECT oi.Item_OrderID, oi.Item_Qty, oi.Item_Price, oi.Item_Sub,
-               p.Prod_ID, p.Prod_Title, p.Prod_Image
-        FROM OrderItem oi
-        JOIN Product p ON oi.Item_ProdID = p.Prod_ID
-        WHERE oi.Item_OrderID IN ($placeholders)
-          AND p.Prod_SellID = ?
-        ORDER BY oi.Item_ID
-    ");
-    $stmtI->bind_param($types, ...$orderIds, ...[$sellId]);
-    $stmtI->execute();
-    $resI = $stmtI->get_result();
-    while ($item = $resI->fetch_assoc()) {
-        $orderItems[$item['Item_OrderID']][] = $item;
+    foreach ($orders as $ord) {
+        $orderId = $ord['Order_ID'];
+        $itemsData = getData("orders/{$orderId}/items");
+        if ($itemsData) {
+            foreach ($itemsData as $itemId => $itemData) {
+                $productId = $itemData['productId'] ?? '';
+                $product = getData("products/{$productId}");
+                if ($product && ($product['sellerId'] ?? '') === $uid) {
+                    $orderItems[$orderId][] = [
+                        'Item_OrderID' => $orderId,
+                        'Item_Qty' => $itemData['quantity'] ?? 1,
+                        'Item_Price' => $itemData['price'] ?? 0,
+                        'Item_Sub' => $itemData['subtotal'] ?? 0,
+                        'Prod_ID' => $productId,
+                        'Prod_Title' => $product['title'] ?? '',
+                        'Prod_Image' => $product['image'] ?? ''
+                    ];
+                }
+            }
+        }
     }
-    $stmtI->close();
 }
-
-$conn->close();
 
 $title    = 'Sales Orders';
 $basePath = '../';
@@ -494,17 +519,26 @@ include('../layout/layout.php');
                     </div>
 
                     <?php if ($ord['Order_ReqStatus'] === 'Pending'): ?>
-                        <div style="display:flex; gap:10px; padding: 12px 0;">
-                            <form method="POST" action="orders.php" style="margin:0;">
-                                <input type="hidden" name="action" value="accept">
-                                <input type="hidden" name="order_id" value="<?= $ord['Order_ID'] ?>">
-                                <button type="submit" class="btn-primary" style="padding: 8px 16px; border-radius: 20px; font-size: 13px;">Accept Order</button>
-                            </form>
-                            <form method="POST" action="orders.php" style="margin:0;">
-                                <input type="hidden" name="action" value="reject">
-                                <input type="hidden" name="order_id" value="<?= $ord['Order_ID'] ?>">
-                                <button type="submit" class="btn-primary" style="padding: 8px 16px; border-radius: 20px; font-size: 13px; background: #cc1100;">Reject Order</button>
-                            </form>
+                        <div style="background:#fffbea; border:1px solid #f0c040; border-radius:10px; padding:14px 16px; margin-bottom:4px;">
+                            <div style="font-size:13px; font-weight:600; margin-bottom:10px; color:#856404;">
+                                <i class="bi bi-hourglass-split"></i> This order is awaiting your response.
+                            </div>
+                            <div style="display:flex; gap:10px;">
+                                <form method="POST" action="orders.php" style="margin:0;">
+                                    <input type="hidden" name="action" value="accept">
+                                    <input type="hidden" name="order_id" value="<?= $ord['Order_ID'] ?>">
+                                    <button type="submit" style="padding:9px 22px; border-radius:20px; font-size:13px; font-weight:700; background:#2e7d32; color:#fff; border:none; cursor:pointer; font-family:var(--font);">
+                                        <i class="bi bi-check-circle-fill"></i> Accept Order
+                                    </button>
+                                </form>
+                                <form method="POST" action="orders.php" style="margin:0;">
+                                    <input type="hidden" name="action" value="reject">
+                                    <input type="hidden" name="order_id" value="<?= $ord['Order_ID'] ?>">
+                                    <button type="submit" style="padding:9px 22px; border-radius:20px; font-size:13px; font-weight:700; background:#c62828; color:#fff; border:none; cursor:pointer; font-family:var(--font);">
+                                        <i class="bi bi-x-circle-fill"></i> Reject Order
+                                    </button>
+                                </form>
+                            </div>
                         </div>
                     <?php elseif ($ord['Order_ReqStatus'] === 'Rejected'): ?>
                         <div class="no-ship-note" style="color:var(--red);">

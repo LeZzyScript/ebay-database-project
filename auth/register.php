@@ -1,8 +1,8 @@
 <?php
 session_start();
-if (isset($_SESSION['account_id'])) { header('Location: ../index.php'); exit; }
+if (isset($_SESSION['firebase_uid'])) { header('Location: ../index.php'); exit; }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
 $errors  = [];
 $success = false;
@@ -58,17 +58,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     if (!$addr)          $errors[] = 'Please complete all address fields.';
 
-    // Duplicate email check
-    $stmt = $conn->prepare('SELECT User_ID FROM User WHERE User_Email = ?');
-    $stmt->bind_param('s', $email); $stmt->execute();
-    if ($stmt->get_result()->num_rows > 0) $errors[] = 'An account with this email already exists.';
-    $stmt->close();
+    // Duplicate email check - Firebase will handle this, but we can check existing users
+    try {
+        $auth->getUserByEmail($email);
+        $errors[] = 'An account with this email already exists.';
+    } catch (\Kreait\Firebase\Exception\Auth\UserNotFound $e) {
+        // Email doesn't exist, continue
+    }
 
-    // Duplicate username check
-    $stmt = $conn->prepare('SELECT User_ID FROM User WHERE User_AccName = ?');
-    $stmt->bind_param('s', $accname); $stmt->execute();
-    if ($stmt->get_result()->num_rows > 0) $errors[] = 'Username is already taken.';
-    $stmt->close();
+    // Duplicate username check - need to query Firebase Realtime Database
+    $users = getData('users');
+    if ($users) {
+        foreach ($users as $uid => $userData) {
+            if (isset($userData['profile']['accountName']) && $userData['profile']['accountName'] === $accname) {
+                $errors[] = 'Username is already taken.';
+                break;
+            }
+        }
+    }
 
     // Seller/Business fields
     $sell_type  = trim($_POST['sell_type']   ?? '');
@@ -92,81 +99,76 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // ── Insert if no errors ──
     if (empty($errors)) {
-        $hashed = password_hash($pw, PASSWORD_BCRYPT);
-        $today  = date('Y-m-d H:i:s');
-
-        // Generate User_ID (USER + 4 digits)
-        $userId = 'USER0001';
-        $res = $conn->query("SELECT User_ID FROM User WHERE User_ID LIKE 'USER%' ORDER BY User_ID DESC LIMIT 1");
-        if ($res && $row = $res->fetch_assoc()) {
-            $lastId = $row['User_ID'];
-            if (preg_match('/^USER(\d{4})$/', $lastId, $matches)) {
-                $nextNum = intval($matches[1]) + 1;
-                $userId = sprintf("USER%04d", $nextNum);
-            }
-        }
-        
-        $dbAccType = 'buyer';
-        if ($accType === 'business') $dbAccType = 'seller';
-
-        $stmt = $conn->prepare(
-            'INSERT INTO User (User_ID,User_FName,User_LName,User_AccName,User_Email,User_Password,User_Contact,User_Address,User_DateReg,User_AccType)
-             VALUES (?,?,?,?,?,?,?,?,?,?)'
-        );
-        $stmt->bind_param('ssssssssss', $userId,$fname,$lname,$accname,$email,$hashed,$contact,$addr,$today,$dbAccType);
-        
-        if (!$stmt->execute()) {
-            $errors[] = "Failed to register account: " . $stmt->error;
-        }
-        $stmt->close();
-
-        if (empty($errors) && $accType === 'business') {
-            $feeRate = 0.05;
-            $status  = 'Active';
+        try {
+            // Create user in Firebase Auth
+            $userProperties = [
+                'email' => $email,
+                'emailVerified' => false,
+                'password' => $pw,
+                'displayName' => $fname . ' ' . $lname,
+            ];
             
-            // Generate Sell_ID (SELL + 4 digits) 
-            $sellId = 'SELL0001';
-            $res = $conn->query("SELECT Sell_ID FROM Seller WHERE Sell_ID LIKE 'SELL%' ORDER BY Sell_ID DESC LIMIT 1");
-            if ($res && $row = $res->fetch_assoc()) {
-                $lastId = $row['Sell_ID'];
-                if (preg_match('/^SELL(\d{4})$/', $lastId, $matches)) {
-                    $nextNum = intval($matches[1]) + 1;
-                    $sellId = sprintf("SELL%04d", $nextNum);
-                }
+            $createdUser = $auth->createUser($userProperties);
+            $uid = $createdUser->uid;
+            $today = date('Y-m-d');
+            
+            // Determine account type
+            $dbAccType = 'buyer';
+            if ($accType === 'business') $dbAccType = 'seller';
+            
+            // Prepare user data for Firebase Realtime Database
+            $userData = [
+                'profile' => [
+                    'firstName' => $fname,
+                    'lastName' => $lname,
+                    'accountName' => $accname,
+                    'email' => $email,
+                    'contact' => $contact,
+                    'address' => $addr
+                ],
+                'accountType' => $dbAccType,
+                'status' => 'active',
+                'dateRegistered' => $today
+            ];
+            
+            // Add seller data if business account
+            if ($accType === 'business') {
+                $sellId = generateId('SELL');
+                $busId = generateId('BUSI');
+                
+                $userData['sellerData'] = [
+                    'sellerId' => $sellId,
+                    'type' => $sell_type,
+                    'feeRate' => 5.00,
+                    'status' => 'active',
+                    'joinDate' => $today,
+                    'business' => [
+                        'businessId' => $busId,
+                        'name' => $bus_name,
+                        'taxId' => $bus_taxid,
+                        'regNumber' => $bus_regnum,
+                        'regNum' => $bus_regnum,
+                        'verified' => false,
+                        'verificationDate' => null,
+                        'type' => $bus_type,
+                        'phone' => $bus_phone,
+                        'address' => $bus_addr
+                    ]
+                ];
             }
-
-            $stmt = $conn->prepare(
-                'INSERT INTO Seller (Sell_ID,Sell_UserID,Sell_Type,Sell_FeeRate,Sell_Status,Sell_JoinDate) VALUES (?,?,?,?,?,?)'
-            );
-            $stmt->bind_param('ssdsss', $sellId,$userId,$sell_type,$feeRate,$status,$today);
-            $stmt->execute();
-            $stmt->close();
-
-            // Generate Bus_ID (BUSI + 4 digits)
-            $busId = 'BUSI0001';
-            $res = $conn->query("SELECT Bus_ID FROM Business WHERE Bus_ID LIKE 'BUSI%' ORDER BY Bus_ID DESC LIMIT 1");
-            if ($res && $row = $res->fetch_assoc()) {
-                $lastId = $row['Bus_ID'];
-                if (preg_match('/^BUSI(\d{4})$/', $lastId, $matches)) {
-                    $nextNum = intval($matches[1]) + 1;
-                    $busId = sprintf("BUSI%04d", $nextNum);
-                }
+            
+            // Store user data in Firebase Realtime Database
+            setData("users/{$uid}", $userData);
+            
+            if (empty($errors)) {
+                $_SESSION['flash'] = 'Account created successfully! Please sign in.';
+                header('Location: signin.php');
+                exit;
             }
-
-            $stmt = $conn->prepare(
-                'INSERT INTO Business (Bus_ID,Bus_SellID,Bus_Name,Bus_TaxID,Bus_RegNum,Bus_Verified,Bus_VerDate,Bus_Type,Bus_Phone,Bus_Address)
-                 VALUES (?,?,?,?,?,0,NULL,?,?,?)'
-            );
-            $stmt->bind_param('ssssssss', $busId,$sellId,$bus_name,$bus_taxid,$bus_regnum,$bus_type,$bus_phone,$bus_addr);
-            $stmt->execute();
-            $stmt->close();
-        }
-
-
-        if (empty($errors)) {
-            $_SESSION['flash'] = 'Account created successfully! Please sign in.';
-            header('Location: signin.php');
-            exit;
+        } catch (\Kreait\Firebase\Exception\AuthException $e) {
+            $errors[] = "Failed to create account: " . $e->getMessage();
+        } catch (\Exception $e) {
+            $errors[] = "An error occurred: " . $e->getMessage();
         }
     }
 }
@@ -629,8 +631,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // Initialize state
-    setAccountType('personal');
+    // Initialize state from PHP value
+    setAccountType('<?= htmlspecialchars($accType) ?>');
 
     btnPersonal.addEventListener('click', () => setAccountType('personal'));
     btnBusiness.addEventListener('click', () => setAccountType('business'));

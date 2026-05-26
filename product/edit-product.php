@@ -1,6 +1,6 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id']) || empty($_SESSION['is_seller'])) {
+if (!isset($_SESSION['firebase_uid']) || empty($_SESSION['is_seller'])) {
     header('Location: ../buyer/dashboard.php');
     exit;
 }
@@ -11,35 +11,14 @@ if (!isset($_GET['id'])) {
 }
 
 $prodId = $_GET['id'];
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-// Fetch seller's Sell_ID
-$sellId = null;
-$stmt = $conn->prepare("SELECT Sell_ID FROM Seller WHERE Sell_UserID = ?");
-$stmt->bind_param("s", $_SESSION['account_id']);
-$stmt->execute();
-$res = $stmt->get_result();
-if ($row = $res->fetch_assoc()) {
-    $sellId = $row['Sell_ID'];
-}
-$stmt->close();
-
-if (!$sellId) {
-    die("Seller profile not found.");
-}
+$uid = $_SESSION['firebase_uid'];
 
 // Fetch existing product
-$product = null;
-$stmt = $conn->prepare("SELECT * FROM Product WHERE Prod_ID = ? AND Prod_SellID = ?");
-$stmt->bind_param("ss", $prodId, $sellId);
-$stmt->execute();
-$res = $stmt->get_result();
-if ($row = $res->fetch_assoc()) {
-    $product = $row;
-}
-$stmt->close();
+$product = getData("products/{$prodId}");
 
-if (!$product) {
+if (!$product || ($product['sellerId'] ?? '') !== $uid) {
     $_SESSION['flash'] = "Product not found or access denied.";
     header("Location: ../seller/dashboard.php");
     exit;
@@ -60,38 +39,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$title || !$catId || !$desc || $price <= 0 || $stock < 0) {
         $error = "Please fill in all required fields correctly.";
     } else {
-        $stmt = $conn->prepare("UPDATE Product SET Prod_Title=?, Prod_CatID=?, Prod_Desc=?, Prod_Price=?, Prod_Image=?, Prod_Stock=?, Prod_DateUpd=? WHERE Prod_ID=? AND Prod_SellID=?");
-        $stmt->bind_param("sssdsssss", $title, $catId, $desc, $price, $imageUrl, $stock, $today, $prodId, $sellId);
-        
-        if ($stmt->execute()) {
-            $_SESSION['flash'] = "Listing updated successfully!";
-            header("Location: ../seller/dashboard.php");
-            exit;
-        } else {
-            $error = "Failed to update product: " . $conn->error;
-        }
-        $stmt->close();
+        updateData("products/{$prodId}", [
+            'title' => $title,
+            'description' => $desc,
+            'price' => $price,
+            'image' => $imageUrl,
+            'stock' => $stock,
+            'categoryId' => $catId,
+            'dateUpdated' => $today
+        ]);
+
+        $_SESSION['flash'] = "Listing updated successfully!";
+        header("Location: ../seller/dashboard.php");
+        exit;
     }
 } else {
     // Populate form with existing data
-    $title    = $product['Prod_Title'];
-    $catId    = $product['Prod_CatID'];
-    $desc     = $product['Prod_Desc'];
-    $price    = $product['Prod_Price'];
-    $stock    = $product['Prod_Stock'];
-    $imageUrl = $product['Prod_Image'];
+    $title    = $product['title'] ?? '';
+    $catId    = $product['categoryId'] ?? '';
+    $desc     = $product['description'] ?? '';
+    $price    = $product['price'] ?? 0;
+    $stock    = $product['stock'] ?? 0;
+    $imageUrl = $product['image'] ?? '';
 }
 
 // Fetch categories for the dropdown
 $categories = [];
-$catRes = $conn->query("SELECT Cat_ID, Cat_Name FROM Category WHERE Cat_Status = 'active' ORDER BY Cat_Name ASC");
-if ($catRes) {
-    while ($r = $catRes->fetch_assoc()) {
-        $categories[] = $r;
+$categoriesData = getData('categories');
+if ($categoriesData) {
+    foreach ($categoriesData as $catIdKey => $catData) {
+        if (($catData['status'] ?? '') === 'active') {
+            $categories[] = [
+                'Cat_ID' => $catIdKey,
+                'Cat_Name' => $catData['name'] ?? ''
+            ];
+        }
     }
 }
 
-$pageTitle = "Edit Listing - " . htmlspecialchars($product['Prod_Title']);
+$pageTitle = "Edit Listing - " . htmlspecialchars($title);
 $basePath = '../';
 include("../layout/layout.php");
 ?>

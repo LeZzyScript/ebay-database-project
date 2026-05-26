@@ -1,11 +1,11 @@
 <?php
 session_start();
-if (isset($_SESSION['account_id'])) {
+if (isset($_SESSION['firebase_uid'])) {
     header('Location: ../index.php');
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
 $step     = $_POST['step'] ?? 'find';   // 'find' | 'reset'
 $error    = '';
@@ -21,18 +21,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step === 'find') {
         $error = 'Please enter your email address or username.';
         $step  = 'find';
     } else {
-        $stmt = $conn->prepare('SELECT User_ID, User_FName FROM User WHERE User_Email = ? OR User_AccName = ?');
-        $stmt->bind_param('ss', $emailVal, $emailVal);
-        $stmt->execute();
-        $res = $stmt->get_result();
-        if ($row = $res->fetch_assoc()) {
-            $userId = $row['User_ID'];
-            $step   = 'reset';
+        // Check if it's an email or username
+        $foundUid = null;
+        $foundEmail = null;
+        
+        if (filter_var($emailVal, FILTER_VALIDATE_EMAIL)) {
+            // It's an email, find the user by email in Firebase Auth
+            try {
+                $userRecord = $auth->getUserByEmail($emailVal);
+                $foundUid = $userRecord->uid;
+                $foundEmail = $userRecord->email;
+            } catch (\Exception $e) {
+                $error = 'No account found with that email.';
+            }
         } else {
-            $error = 'No account found with that email or username.';
-            $step  = 'find';
+            // It's a username, search Firebase Realtime Database to find email
+            $usersData = getData('users');
+            if ($usersData) {
+                foreach ($usersData as $uid => $userData) {
+                    $profile = $userData['profile'] ?? [];
+                    if (isset($profile['accountName']) && strtolower($profile['accountName']) === strtolower($emailVal)) {
+                        $foundUid = $uid;
+                        $foundEmail = $profile['email'] ?? '';
+                        break;
+                    }
+                }
+            }
+            
+            if (!$foundUid) {
+                $error = 'No account found with that username.';
+            }
         }
-        $stmt->close();
+        
+        if ($foundUid) {
+            $userId = $foundUid;
+            $emailVal = $foundEmail;
+            $step = 'reset';
+        }
     }
 }
 
@@ -53,15 +78,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $step === 'reset') {
         $error = 'Session expired. Please start over.';
         $step  = 'find';
     } else {
-        $hashed = password_hash($pw, PASSWORD_BCRYPT);
-        $stmt = $conn->prepare('UPDATE User SET User_Password = ? WHERE User_ID = ?');
-        $stmt->bind_param('ss', $hashed, $userId);
-        $stmt->execute();
-        $stmt->close();
-
-        $_SESSION['flash'] = 'Password reset successfully! Please sign in with your new password.';
-        header('Location: signin.php');
-        exit;
+        try {
+            $auth->updateUser($userId, [
+                'password' => $pw
+            ]);
+            $_SESSION['flash'] = 'Password reset successfully! Please sign in with your new password.';
+            header('Location: signin.php');
+            exit;
+        } catch (\Exception $e) {
+            $error = 'Failed to reset password: ' . $e->getMessage();
+        }
     }
 }
 ?>

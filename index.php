@@ -1,24 +1,50 @@
 <?php
 session_start();
-require_once('config/db.php');
+require_once('config/firebase.php');
 
 // Fetch up to 12 active categories
 $categories = [];
-$res = $conn->query("SELECT * FROM Category WHERE Cat_Status='active' LIMIT 12");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $categories[] = $row;
+$allCategories = getData('categories');
+if ($allCategories) {
+    $count = 0;
+    foreach ($allCategories as $catId => $catData) {
+        if ($count >= 12) break;
+        $status = $catData['status'] ?? '';
+        if ($status === 'active') {
+            $categories[] = [
+                'Cat_ID'          => $catId,
+                'Cat_Name'        => $catData['name'] ?? '',
+                'Cat_Icon'        => $catData['icon'] ?? 'bi-tag',
+                'Cat_Description' => $catData['description'] ?? '',
+                'Cat_Status'      => $status
+            ];
+            $count++;
+        }
     }
 }
 
 // Fetch the 6 latest products
 $latestProducts = [];
-$res2 = $conn->query("SELECT * FROM Product ORDER BY Prod_ID DESC LIMIT 6");
-if ($res2) {
-    while ($row = $res2->fetch_assoc()) {
-        $latestProducts[] = $row;
+$allProducts = getData('products');
+if ($allProducts) {
+    $productsArray = [];
+    foreach ($allProducts as $prodId => $prodData) {
+        $productsArray[] = [
+            'Prod_ID'    => $prodId,
+            'Prod_Title' => $prodData['title'] ?? '',
+            'Prod_Price' => $prodData['price'] ?? 0,
+            'Prod_Image' => $prodData['image'] ?? '',
+            'dateAdded'  => $prodData['dateAdded'] ?? '1970-01-01'
+        ];
     }
+    // Sort by dateAdded (descending) and take latest 6
+    usort($productsArray, function($a, $b) {
+        return strtotime($b['dateAdded']) - strtotime($a['dateAdded']);
+    });
+    $latestProducts = array_slice($productsArray, 0, 6);
 }
+
+$isLoggedIn = isUserLoggedIn();
 
 $title = "Home";
 include("layout/layout.php");

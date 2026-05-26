@@ -2,16 +2,24 @@
 session_start();
 header('Cache-Control: no-store, no-cache, must-revalidate');
 header('Pragma: no-cache');
-if (isset($_SESSION['account_id'])) {
-    if (!empty($_SESSION['is_admin'])) {
-        header('Location: ../admin/dashboard.php');
 
-    } elseif (!empty($_SESSION['is_seller'])) {
-        header('Location: ../seller/dashboard.php');
-    } else {
-        header('Location: ../buyer/dashboard.php');
+require_once('../config/firebase.php');
+
+// Check if already logged in
+if (isset($_SESSION['firebase_uid'])) {
+    $userData = getCurrentUserData();
+    if ($userData) {
+        $accountType = $userData['accountType'] ?? 'buyer';
+        
+        if ($accountType === 'admin') {
+            header('Location: ../admin/dashboard.php');
+        } elseif ($accountType === 'seller') {
+            header('Location: ../seller/dashboard.php');
+        } else {
+            header('Location: ../buyer/dashboard.php');
+        }
+        exit;
     }
-    exit;
 }
 
 if (empty($_SESSION['csrf_token'])) {
@@ -33,6 +41,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $emailVal = trim($_POST['email'] ?? '');
     $step     = $_POST['step'] ?? 'email';
 
+    // If both email and password were posted without a step (e.g. modal form),
+    // treat it as the password authentication step directly.
+    if ($step === 'email' && !empty($_POST['password'])) {
+        $step = 'password';
+    }
+
     if ($step === 'email') {
         if (!$emailVal) {
             $error = 'Please enter a valid email address or username.';
@@ -45,65 +59,100 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$password) {
             $error = 'Please enter your password.';
         } else {
-            require_once('../config/db.php');
-            $stmt = $conn->prepare('SELECT * FROM User WHERE User_Email = ? OR User_AccName = ?');
-            $stmt->bind_param('ss', $emailVal, $emailVal);
-            $stmt->execute();
-            $result = $stmt->get_result();
-            
-            if ($row = $result->fetch_assoc()) {
-                if (password_verify($password, $row['User_Password'])) {
-
-                        $_SESSION['account_id']   = $row['User_ID'];
-                        $_SESSION['display_name'] = $row['User_FName'] . ' ' . $row['User_LName'];
-                        
-                        // Check if user is a seller
-                        $sellStmt = $conn->prepare('SELECT Sell_ID FROM Seller WHERE Sell_UserID = ?');
-                        $sellStmt->bind_param('s', $row['User_ID']);
-                        $sellStmt->execute();
-                        $sellRes = $sellStmt->get_result();
-                        $isSeller = $sellRes->num_rows > 0;
-                        $sellStmt->close();
-                        
-                        $_SESSION['is_seller'] = $isSeller;
-                        
-                        // Check if user is an admin
-                        $adminStmt = $conn->prepare('SELECT * FROM Admin WHERE Admin_UserID = ?');
-                        $adminStmt->bind_param('s', $row['User_ID']);
-                        $adminStmt->execute();
-                        $adminRes = $adminStmt->get_result();
-                        if ($adminRow = $adminRes->fetch_assoc()) {
-                            $_SESSION['is_admin'] = true;
-                            $_SESSION['admin_level'] = $adminRow['Admin_Level'];
-                            $_SESSION['admin_perm'] = $adminRow['Admin_Perm'];
-                        } else {
-                            $_SESSION['is_admin'] = false;
+            try {
+                // Check if input is username or email
+                $loginEmail = $emailVal;
+                
+                // If it looks like a username (no @ symbol), look up the email in Firebase
+                if (!filter_var($emailVal, FILTER_VALIDATE_EMAIL)) {
+                    $allUsers = getData('users');
+                    $foundEmail = null;
+                    if ($allUsers) {
+                        foreach ($allUsers as $uid => $userData) {
+                            if (isset($userData['profile']['accountName']) && 
+                                strtolower($userData['profile']['accountName']) === strtolower($emailVal)) {
+                                $foundEmail = $userData['profile']['email'] ?? null;
+                                break;
+                            }
                         }
-                        $adminStmt->close();
-                        
-
-
-                        if ($redirect) {
-                            header('Location: ../' . $redirect);
-                        } elseif (isset($_SESSION['is_admin']) && $_SESSION['is_admin']) {
-                            header('Location: ../admin/dashboard.php');
-
-                        } elseif ($isSeller) {
-                            header('Location: ../seller/dashboard.php');
-                        } else {
-                            header('Location: ../buyer/dashboard.php');
-                        }
-                        exit;
-
-                } else {
-                    $error = 'The email or password you entered doesn\'t match any account.';
-                    $step  = 'password';
+                    }
+                    if (!$foundEmail) {
+                        $error = 'The username or password you entered doesn\'t match any account.';
+                        $step = 'password';
+                    } else {
+                        $loginEmail = $foundEmail;
+                    }
                 }
-            } else {
+                
+                // Sign in with Firebase Admin SDK
+                $user = $auth->signInWithEmailAndPassword($loginEmail, $password);
+                
+                // Get UID from SignInResult — must use firebaseUserId() method, not ->uid property
+                $uid = $user->firebaseUserId();
+                
+                if (!$uid) {
+                    $error = 'Authentication failed: could not retrieve user ID. Please try again.';
+                    $step = 'password';
+                    throw new \Exception('firebaseUserId() returned null');
+                }
+                
+                // Get user data from Firebase Realtime Database
+                $userData = getData("users/{$uid}");
+                
+                if ($userData) {
+                    $_SESSION['firebase_uid'] = $uid;
+                    $_SESSION['display_name'] = ($userData['profile']['firstName'] ?? '') . ' ' . ($userData['profile']['lastName'] ?? '');
+                    $_SESSION['account_type'] = $userData['accountType'] ?? 'buyer';
+                    
+                    // Check if seller
+                    $_SESSION['is_seller'] = ($_SESSION['account_type'] === 'seller');
+                    
+                    // Check if admin
+                    $_SESSION['is_admin'] = ($_SESSION['account_type'] === 'admin');
+                    if ($_SESSION['is_admin']) {
+                        $adminsData = getData('admins');
+                        $adminFound = false;
+                        if ($adminsData) {
+                            foreach ($adminsData as $adminId => $adminRec) {
+                                if (isset($adminRec['userId']) && $adminRec['userId'] === $uid) {
+                                    $_SESSION['admin_id'] = $adminId;
+                                    $_SESSION['admin_level'] = $adminRec['level'] ?? 1;
+                                    $_SESSION['admin_perm'] = $adminRec['permissions'] ?? '';
+                                    $adminFound = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!$adminFound && isset($userData['adminData'])) {
+                            $_SESSION['admin_level'] = $userData['adminData']['level'] ?? 1;
+                            $_SESSION['admin_perm'] = $userData['adminData']['permissions'] ?? '';
+                        }
+                    }
+
+                    if ($redirect) {
+                        header('Location: ../' . $redirect);
+                    } elseif ($_SESSION['is_admin']) {
+                        header('Location: ../admin/dashboard.php');
+                    } elseif ($_SESSION['is_seller']) {
+                        header('Location: ../seller/dashboard.php');
+                    } else {
+                        header('Location: ../buyer/dashboard.php');
+                    }
+                    exit;
+                } else {
+                    $error = 'User data not found. Please contact support.';
+                    $step = 'password';
+                }
+            } catch (\Kreait\Firebase\Exception\Auth\InvalidPassword $e) {
                 $error = 'The email or password you entered doesn\'t match any account.';
-                $step  = 'password';
+                $step = 'password';
+            } catch (\Kreait\Firebase\Exception\Auth\UserNotFound $e) {
+                $error = 'The email or password you entered doesn\'t match any account.';
+                $step = 'password';
+            } catch (\Exception $e) {
+                $error = 'An error occurred. Please try again.';
+                $step = 'password';
             }
-            $stmt->close();
         }
     }
 }

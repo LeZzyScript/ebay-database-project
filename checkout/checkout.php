@@ -3,14 +3,31 @@ session_start();
 
 $basePath = '../';
 // Require login
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     $redirect = urlencode('checkout/checkout.php' . (!empty($_SERVER['QUERY_STRING']) ? '?' . $_SERVER['QUERY_STRING'] : ''));
     header('Location: ../auth/signin.php?redirect=' . $redirect);
     exit;
 }
 
-require_once('../config/db.php');
-$userId = $_SESSION['account_id'];
+require_once('../config/firebase.php');
+$uid = $_SESSION['firebase_uid'];
+
+$getSellerName = function($sellerId) {
+    if (empty($sellerId)) return 'Unknown Seller';
+    $userData = getData("users/{$sellerId}");
+    if ($userData && isset($userData['sellerData'])) {
+        return $userData['profile']['accountName'] ?? trim(($userData['profile']['firstName'] ?? '') . ' ' . ($userData['profile']['lastName'] ?? '')) ?: 'Unknown Seller';
+    }
+    $allUsers = getData('users');
+    if ($allUsers) {
+        foreach ($allUsers as $uKey => $uData) {
+            if (isset($uData['sellerData']['sellerId']) && $uData['sellerData']['sellerId'] === $sellerId) {
+                return $uData['profile']['accountName'] ?? trim(($uData['profile']['firstName'] ?? '') . ' ' . ($uData['profile']['lastName'] ?? '')) ?: 'Unknown Seller';
+            }
+        }
+    }
+    return 'Unknown Seller';
+};
 
 // 1. Handle Order Processing
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -22,58 +39,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $items = [];
     if ($auctionId) {
         // Fetch auction winner info
-        $stmt = $conn->prepare("
-            SELECT p.*, a.Auc_ID, MAX(b.Bid_Amount) as Winning_Bid
-            FROM Auction a
-            JOIN Product p ON a.Auc_ProdID = p.Prod_ID
-            JOIN Bid b ON b.Bid_AucID = a.Auc_ID
-            WHERE a.Auc_ID = ? AND a.Auc_Status = 'Ended' AND b.Bid_UserID = ?
-            GROUP BY a.Auc_ID
-        ");
-        $stmt->bind_param("ss", $auctionId, $userId);
-        $stmt->execute();
-        if ($row = $stmt->get_result()->fetch_assoc()) {
-            // Check if they really won
-            $stmtH = $conn->prepare("SELECT Auc_HighBid FROM Auction WHERE Auc_ID = ?");
-            $stmtH->bind_param("s", $auctionId);
-            $stmtH->execute();
-            $highBid = $stmtH->get_result()->fetch_assoc()['Auc_HighBid'];
-            $stmtH->close();
-            
-            if ($row['Winning_Bid'] >= $highBid) {
-                $row['Checkout_Qty'] = 1;
-                $row['Prod_Price'] = $row['Winning_Bid']; // Use bid amount as price
-                $items[] = $row;
+        $auction = getData("auctions/{$auctionId}");
+        
+        // Auto-close if active but past end date
+        if ($auction && ($auction['status'] ?? '') === 'active' && strtotime($auction['endDate'] ?? '') < time()) {
+            updateData("auctions/{$auctionId}/status", 'ended');
+            $productId = $auction['productId'] ?? '';
+            if ($productId) {
+                updateData("products/{$productId}/auctionData/status", 'ended');
+            }
+            $auction['status'] = 'ended';
+        }
+
+        if ($auction && ($auction['status'] ?? '') === 'ended') {
+            $productId = $auction['productId'] ?? '';
+            $product = getData("products/{$productId}");
+            if ($product) {
+                // Get user's highest bid
+                $bidsData = getData("auctions/{$auctionId}/bids");
+                $myTopBid = 0;
+                if ($bidsData) {
+                    foreach ($bidsData as $bidData) {
+                        if ($bidData['userId'] === $uid && $bidData['amount'] > $myTopBid) {
+                            $myTopBid = $bidData['amount'];
+                        }
+                    }
+                }
+                
+                // Check if they won
+                if ($myTopBid >= ($auction['currentHighBid'] ?? 0)) {
+                    $product['Checkout_Qty'] = 1;
+                    $product['price'] = $myTopBid;
+                    $product['Prod_Price'] = $myTopBid;
+                    $product['Prod_ID'] = $productId;
+                    $items[] = $product;
+                }
             }
         }
-        $stmt->close();
     } elseif ($buyNowId) {
-        $stmt = $conn->prepare("SELECT * FROM Product WHERE Prod_ID = ? AND Prod_Status = 'active'");
-        $stmt->bind_param("s", $buyNowId);
-        $stmt->execute();
-        if ($row = $stmt->get_result()->fetch_assoc()) {
-            if ($row['Prod_Stock'] >= $buyNowQty) {
-                $row['Checkout_Qty'] = $buyNowQty;
-                $items[] = $row;
+        $product = getData("products/{$buyNowId}");
+        if ($product && ($product['status'] ?? '') === 'active') {
+            if (($product['stock'] ?? 0) >= $buyNowQty) {
+                $product['Checkout_Qty'] = $buyNowQty;
+                $product['Prod_ID'] = $buyNowId;
+                $items[] = $product;
             }
         }
-        $stmt->close();
     } else {
-        $stmt = $conn->prepare("
-            SELECT c.Cart_Qty as Checkout_Qty, p.* 
-            FROM Cart c
-            JOIN Product p ON c.Cart_ProdID = p.Prod_ID
-            WHERE c.Cart_UserID = ? AND p.Prod_Status = 'active'
-        ");
-        $stmt->bind_param("s", $userId);
-        $stmt->execute();
-        $res = $stmt->get_result();
-        while ($row = $res->fetch_assoc()) {
-            if ($row['Prod_Stock'] >= $row['Checkout_Qty']) {
-                $items[] = $row;
+        $cartItems = getData("carts/{$uid}/items");
+        if ($cartItems) {
+            foreach ($cartItems as $prodId => $cartData) {
+                $product = getData("products/{$prodId}");
+                if ($product && ($product['status'] ?? '') === 'active') {
+                    $qty = $cartData['quantity'] ?? 1;
+                    if (($product['stock'] ?? 0) >= $qty) {
+                        $product['Checkout_Qty'] = $qty;
+                        $product['Prod_ID'] = $prodId;
+                        $items[] = $product;
+                    }
+                }
             }
         }
-        $stmt->close();
     }
     
     if (empty($items)) {
@@ -85,69 +111,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Calculations
     $subtotal = 0;
     foreach ($items as $it) {
-        $subtotal += $it['Prod_Price'] * $it['Checkout_Qty'];
+        $subtotal += ($it['price'] ?? 0) * $it['Checkout_Qty'];
     }
     $shipping = 192.46; // Hardcoded shipping fee
     $total = $subtotal + $shipping;
 
     // Fetch user shipping address
-    $uStmt = $conn->prepare("SELECT * FROM User WHERE User_ID = ?");
-    $uStmt->bind_param("s", $userId);
-    $uStmt->execute();
-    $user = $uStmt->get_result()->fetch_assoc();
-    $uStmt->close();
+    $user = getData("users/{$uid}");
+    $shipAdd = $user['profile']['address'] ?? '';
     
-    $shipAdd = $user['User_Address'];
-    
-    // Generate Order ID (Alphanumeric, e.g. ORD + 5 random chars)
-    $orderId = 'ORD' . strtoupper(substr(md5(uniqid('', true)), 0, 5));
+    // Generate Order ID
+    $orderId = generateId('ORD');
     $today = date('Y-m-d');
     
-    $conn->begin_transaction();
     try {
         // Insert Order
-        $stmtO = $conn->prepare("INSERT INTO `Order` (Order_ID, Order_UserID, Order_Date, Order_Total, Order_PayStat, Order_ShipAdd) VALUES (?, ?, ?, ?, 'Paid', ?)");
-        $stmtO->bind_param("sssds", $orderId, $userId, $today, $total, $shipAdd);
-        $stmtO->execute();
+        setData("orders/{$orderId}", [
+            'userId' => $uid,
+            'date' => $today,
+            'total' => $total,
+            'paymentStatus' => 'Paid',
+            'shippingAddress' => $shipAdd,
+            'status' => 'Pending'
+        ]);
+
         
         // Insert Order Items and Update Stock
         foreach ($items as $it) {
-            $itemId = 'ITM' . strtoupper(substr(md5(uniqid('', true)), 0, 5));
+            $itemId = generateId('ITM');
             $pId = $it['Prod_ID'];
             $qty = $it['Checkout_Qty'];
-            $price = $it['Prod_Price'];
+            $price = $it['price'] ?? 0;
             $sub = $price * $qty;
             
-            $stmtI = $conn->prepare("INSERT INTO OrderItem (Item_ID, Item_OrderID, Item_ProdID, Item_Qty, Item_Price, Item_Sub) VALUES (?, ?, ?, ?, ?, ?)");
-            $stmtI->bind_param("sssidd", $itemId, $orderId, $pId, $qty, $price, $sub);
-            $stmtI->execute();
+            setData("orders/{$orderId}/items/{$itemId}", [
+                'productId' => $pId,
+                'quantity' => $qty,
+                'price' => $price,
+                'subtotal' => $sub
+            ]);
             
-            $stmtS = $conn->prepare("UPDATE Product SET Prod_Stock = Prod_Stock - ? WHERE Prod_ID = ?");
-            $stmtS->bind_param("is", $qty, $pId);
-            $stmtS->execute();
+            // Update product stock
+            $newStock = ($it['stock'] ?? 0) - $qty;
+            updateData("products/{$pId}/stock", $newStock);
         }
         
         // Clear Cart if not Buy It Now or Auction
         if (!$buyNowId && !$auctionId) {
-            $stmtC = $conn->prepare("DELETE FROM Cart WHERE Cart_UserID = ?");
-            $stmtC->bind_param("s", $userId);
-            $stmtC->execute();
+            setData("carts/{$uid}/items", []);
             $_SESSION['cart_count'] = 0;
         }
         
         // Mark auction as paid if it's an auction
         if ($auctionId) {
-            $stmtA = $conn->prepare("UPDATE Auction SET Auc_Status = 'Paid' WHERE Auc_ID = ?");
-            $stmtA->bind_param("s", $auctionId);
-            $stmtA->execute();
+            updateData("auctions/{$auctionId}/status", 'paid');
+            // Sync status to products' copy
+            $auction = getData("auctions/{$auctionId}");
+            $productId = $auction['productId'] ?? '';
+            if ($productId) {
+                updateData("products/{$productId}/auctionData/status", 'paid');
+            }
         }
         
-        $conn->commit();
         $_SESSION['flash'] = "Order placed successfully! Order ID: " . $orderId;
         header("Location: ../buyer/dashboard.php");
         exit;
     } catch (Exception $e) {
-        $conn->rollback();
         $_SESSION['flash'] = "Checkout failed: " . $e->getMessage();
         header("Location: ../cart/cart.php");
         exit;
@@ -163,58 +192,74 @@ $items = [];
 $sellers = []; // Group items by seller for display
 
 if ($auctionId) {
-    $stmt = $conn->prepare("
-        SELECT p.*, u.User_AccName as Seller_Name, MAX(b.Bid_Amount) as Winning_Bid
-        FROM Auction a
-        JOIN Product p ON a.Auc_ProdID = p.Prod_ID
-        JOIN Bid b ON b.Bid_AucID = a.Auc_ID
-        LEFT JOIN Seller s ON p.Prod_SellID = s.Sell_ID
-        LEFT JOIN User u ON s.Sell_UserID = u.User_ID
-        WHERE a.Auc_ID = ? AND a.Auc_Status = 'Ended' AND b.Bid_UserID = ?
-        GROUP BY a.Auc_ID
-    ");
-    $stmt->bind_param("ss", $auctionId, $userId);
-    $stmt->execute();
-    if ($row = $stmt->get_result()->fetch_assoc()) {
-        $row['Checkout_Qty'] = 1;
-        $row['Prod_Price'] = $row['Winning_Bid']; // Override price with winning bid
-        $items[] = $row;
-        $sellers[$row['Seller_Name']][] = $row;
+    $auction = getData("auctions/{$auctionId}");
+    
+    // Auto-close if active but past end date
+    if ($auction && ($auction['status'] ?? '') === 'active' && strtotime($auction['endDate'] ?? '') < time()) {
+        updateData("auctions/{$auctionId}/status", 'ended');
+        $productId = $auction['productId'] ?? '';
+        if ($productId) {
+            updateData("products/{$productId}/auctionData/status", 'ended');
+        }
+        $auction['status'] = 'ended';
     }
-    $stmt->close();
+
+    if ($auction && ($auction['status'] ?? '') === 'ended') {
+        $productId = $auction['productId'] ?? '';
+        $product = getData("products/{$productId}");
+        if ($product) {
+            // Get user's highest bid
+            $bidsData = getData("auctions/{$auctionId}/bids");
+            $myTopBid = 0;
+            if ($bidsData) {
+                foreach ($bidsData as $bidData) {
+                    if ($bidData['userId'] === $uid && $bidData['amount'] > $myTopBid) {
+                        $myTopBid = $bidData['amount'];
+                    }
+                }
+            }
+            
+            // Get seller name
+            $sellerName = $getSellerName($product['sellerId'] ?? '');
+            
+            $product['Checkout_Qty'] = 1;
+            $product['price'] = $myTopBid;
+            $product['Prod_Price'] = $myTopBid;
+            $product['Prod_ID'] = $productId;
+            $product['Seller_Name'] = $sellerName;
+            $items[] = $product;
+            $sellers[$sellerName][] = $product;
+        }
+    }
 } elseif ($buyNowId) {
-    $stmt = $conn->prepare("
-        SELECT p.*, u.User_AccName as Seller_Name 
-        FROM Product p 
-        LEFT JOIN Seller s ON p.Prod_SellID = s.Sell_ID
-        LEFT JOIN User u ON s.Sell_UserID = u.User_ID
-        WHERE p.Prod_ID = ? AND p.Prod_Status = 'active'
-    ");
-    $stmt->bind_param("s", $buyNowId);
-    $stmt->execute();
-    if ($row = $stmt->get_result()->fetch_assoc()) {
-        $row['Checkout_Qty'] = $buyNowQty;
-        $items[] = $row;
-        $sellers[$row['Seller_Name']][] = $row;
+    $product = getData("products/{$buyNowId}");
+    if ($product && ($product['status'] ?? '') === 'active') {
+        // Get seller name
+        $sellerName = $getSellerName($product['sellerId'] ?? '');
+        
+        $product['Checkout_Qty'] = $buyNowQty;
+        $product['Prod_ID'] = $buyNowId;
+        $product['Seller_Name'] = $sellerName;
+        $items[] = $product;
+        $sellers[$sellerName][] = $product;
     }
-    $stmt->close();
 } else {
-    $stmt = $conn->prepare("
-        SELECT c.Cart_Qty as Checkout_Qty, p.*, u.User_AccName as Seller_Name 
-        FROM Cart c
-        JOIN Product p ON c.Cart_ProdID = p.Prod_ID
-        LEFT JOIN Seller s ON p.Prod_SellID = s.Sell_ID
-        LEFT JOIN User u ON s.Sell_UserID = u.User_ID
-        WHERE c.Cart_UserID = ? AND p.Prod_Status = 'active'
-    ");
-    $stmt->bind_param("s", $userId);
-    $stmt->execute();
-    $res = $stmt->get_result();
-    while ($row = $res->fetch_assoc()) {
-        $items[] = $row;
-        $sellers[$row['Seller_Name']][] = $row;
+    $cartItems = getData("carts/{$uid}/items");
+    if ($cartItems) {
+        foreach ($cartItems as $prodId => $cartData) {
+            $product = getData("products/{$prodId}");
+            if ($product && ($product['status'] ?? '') === 'active') {
+                // Get seller name
+                $sellerName = $getSellerName($product['sellerId'] ?? '');
+                
+                $product['Checkout_Qty'] = $cartData['quantity'] ?? 1;
+                $product['Prod_ID'] = $prodId;
+                $product['Seller_Name'] = $sellerName;
+                $items[] = $product;
+                $sellers[$sellerName][] = $product;
+            }
+        }
     }
-    $stmt->close();
 }
 
 if (empty($items)) {
@@ -223,16 +268,12 @@ if (empty($items)) {
 }
 
 // Fetch user data
-$uStmt = $conn->prepare("SELECT * FROM User WHERE User_ID = ?");
-$uStmt->bind_param("s", $userId);
-$uStmt->execute();
-$user = $uStmt->get_result()->fetch_assoc();
-$uStmt->close();
+$user = getData("users/{$uid}");
 
 $subtotal = 0;
 $totalQty = 0;
 foreach ($items as $it) {
-    $subtotal += $it['Prod_Price'] * $it['Checkout_Qty'];
+    $subtotal += ($it['price'] ?? 0) * $it['Checkout_Qty'];
     $totalQty += $it['Checkout_Qty'];
 }
 $shipping = 192.46; // Hardcoded shipping fee
@@ -455,10 +496,10 @@ $title = "Checkout";
         <div class="co-sec">
             <h2>Ship to</h2>
             <div class="ship-info">
-                <?= htmlspecialchars($user['User_FName'] . ' ' . $user['User_LName']) ?><br>
-                <?= htmlspecialchars($user['User_Address']) ?><br>
+                <?= htmlspecialchars(($user['profile']['firstName'] ?? '') . ' ' . ($user['profile']['lastName'] ?? '')) ?><br>
+                <?= htmlspecialchars($user['profile']['address'] ?? '') ?><br>
                 Philippines<br>
-                <?= htmlspecialchars($user['User_Contact']) ?>
+                <?= htmlspecialchars($user['profile']['contact'] ?? '') ?>
             </div>
             <div class="ship-change">Change</div>
         </div>
@@ -476,18 +517,18 @@ $title = "Checkout";
                 <?php foreach ($sellerItems as $it): ?>
                     <div class="item-row">
                         <div class="item-img">
-                            <?php if (!empty($it['Prod_Image'])): ?>
-                                <img src="<?= htmlspecialchars($it['Prod_Image']) ?>" alt="Product">
+                            <?php if (!empty($it['image'])): ?>
+                                <img src="<?= htmlspecialchars($it['image']) ?>" alt="Product">
                             <?php else: ?>
                                 <i class="bi bi-box" style="font-size:3rem;color:var(--muted);"></i>
                             <?php endif; ?>
                         </div>
                         <div class="item-details">
-                            <div class="item-title"><?= htmlspecialchars($it['Prod_Title']) ?></div>
+                            <div class="item-title"><?= htmlspecialchars($it['title'] ?? '') ?></div>
                             <div class="item-qty">Qty <?= $it['Checkout_Qty'] ?></div>
                         </div>
                         <div class="item-price-wrap">
-                            <div class="item-price">₱<?= number_format($it['Prod_Price'] * $it['Checkout_Qty'], 2) ?></div>
+                            <div class="item-price">₱<?= number_format(($it['price'] ?? 0) * $it['Checkout_Qty'], 2) ?></div>
                         </div>
                     </div>
                 <?php endforeach; ?>

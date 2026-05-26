@@ -1,12 +1,12 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     header('Location: ../auth/signin.php');
     exit;
 }
 
-require_once('../config/db.php');
-$userId = $_SESSION['account_id'];
+require_once('../config/firebase.php');
+$uid = $_SESSION['firebase_uid'];
 $orderId = $_GET['order_id'] ?? $_POST['order_id'] ?? '';
 
 if (!$orderId) {
@@ -15,29 +15,30 @@ if (!$orderId) {
 }
 
 // 1. Verify Order belongs to user and is Delivered
-$stmt = $conn->prepare("
-    SELECT o.Order_ID, s.Ship_Status 
-    FROM `Order` o
-    LEFT JOIN Shipment s ON o.Order_ID = s.Ship_OrderID
-    WHERE o.Order_ID = ? AND o.Order_UserID = ?
-");
-$stmt->bind_param("ss", $orderId, $userId);
-$stmt->execute();
-$order = $stmt->get_result()->fetch_assoc();
-$stmt->close();
+$order = getData("orders/{$orderId}");
 
-if (!$order || strtolower($order['Ship_Status'] ?? '') !== 'delivered') {
+if (!$order || ($order['userId'] ?? '') !== $uid) {
+    $_SESSION['flash'] = "Order not found or access denied.";
+    header('Location: orders.php');
+    exit;
+}
+
+$status = $order['status'] ?? 'Processing';
+if ($status !== 'Delivered') {
     $_SESSION['flash'] = "You can only leave feedback for delivered orders.";
     header('Location: orders.php');
     exit;
 }
 
 // 2. Check if feedback already exists for this order
-$stmt = $conn->prepare("SELECT 1 FROM Feedback WHERE Feed_OrderID = ? AND Feed_UserID = ? LIMIT 1");
-$stmt->bind_param("ss", $orderId, $userId);
-$stmt->execute();
-$hasFeedback = $stmt->get_result()->fetch_assoc();
-$stmt->close();
+$hasFeedback = false;
+$allFeedbacks = getData('feedbacks') ?: [];
+foreach ($allFeedbacks as $fId => $fData) {
+    if (($fData['orderId'] ?? '') === $orderId && ($fData['userId'] ?? '') === $uid) {
+        $hasFeedback = true;
+        break;
+    }
+}
 
 if ($hasFeedback) {
     $_SESSION['flash'] = "You have already left feedback for this order.";
@@ -47,25 +48,33 @@ if ($hasFeedback) {
 
 // 3. Get all sellers involved in this order
 $sellers = [];
-$stmt = $conn->prepare("
-    SELECT DISTINCT p.Prod_SellID, u.User_AccName, u.User_FName, u.User_LName
-    FROM OrderItem oi
-    JOIN Product p ON oi.Item_ProdID = p.Prod_ID
-    JOIN Seller s ON p.Prod_SellID = s.Sell_ID
-    JOIN User u ON s.Sell_UserID = u.User_ID
-    WHERE oi.Item_OrderID = ?
-");
-$stmt->bind_param("s", $orderId);
-$stmt->execute();
-$res = $stmt->get_result();
-while ($row = $res->fetch_assoc()) {
-    $sellers[] = $row;
+$orderItems = getData("orders/{$orderId}/items");
+if ($orderItems) {
+    $seenSellers = [];
+    foreach ($orderItems as $itemId => $itemData) {
+        $productId = $itemData['productId'] ?? '';
+        $product = getData("products/{$productId}");
+        if ($product) {
+            $sellerId = $product['sellerId'] ?? '';
+            if ($sellerId && !isset($seenSellers[$sellerId])) {
+                $seenSellers[$sellerId] = true;
+                $sellerUser = getData("users/{$sellerId}");
+                if ($sellerUser) {
+                    $sellerProfile = $sellerUser['profile'] ?? [];
+                    $sellers[] = [
+                        'Prod_SellID' => $sellerId,
+                        'User_AccName' => $sellerProfile['accountName'] ?? '',
+                        'User_FName' => $sellerProfile['firstName'] ?? '',
+                        'User_LName' => $sellerProfile['lastName'] ?? ''
+                    ];
+                }
+            }
+        }
+    }
 }
-$stmt->close();
 
 // 4. Handle form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $conn->begin_transaction();
     try {
         $today = date('Y-m-d');
         foreach ($sellers as $seller) {
@@ -75,18 +84,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             if ($rating < 1 || $rating > 5) $rating = 5; // Fallback
             
-            $feedId = 'FDBK' . strtoupper(substr(md5(uniqid('', true)), 0, 4));
+            $feedId = generateId('FDBK');
             
-            $stmtF = $conn->prepare("INSERT INTO Feedback (Feed_ID, Feed_OrderID, Feed_SellID, Feed_UserID, Feed_Rating, Feed_Comment, Feed_Date) VALUES (?, ?, ?, ?, ?, ?, ?)");
-            $stmtF->bind_param("ssssiss", $feedId, $orderId, $sellId, $userId, $rating, $comment, $today);
-            $stmtF->execute();
+            // Store feedback in Firebase (you may want to create a feedbacks collection)
+            setData("feedbacks/{$feedId}", [
+                'orderId' => $orderId,
+                'sellerId' => $sellId,
+                'userId' => $uid,
+                'rating' => $rating,
+                'comment' => $comment,
+                'date' => $today
+            ]);
         }
-        $conn->commit();
         $_SESSION['flash'] = "Thank you! Your feedback has been submitted.";
         header('Location: orders.php');
         exit;
     } catch (Exception $e) {
-        $conn->rollback();
         $error = "Failed to submit feedback: " . $e->getMessage();
     }
 }

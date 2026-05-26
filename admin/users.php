@@ -1,7 +1,7 @@
 <?php
 require_once "includes/auth.php";
 requireAdminLogin();
-require_once "../config/db.php";
+require_once "../config/firebase.php";
 
 // Handle actions
 $message = '';
@@ -9,52 +9,102 @@ $messageType = '';
 
 // Suspend/Activate user
 if (isset($_GET['toggle']) && isset($_GET['id'])) {
-    $uid = $conn->real_escape_string($_GET['id']);
+    $uid = $_GET['id'];
     $action = $_GET['toggle'];
     $status = ($action === 'suspend') ? 'suspended' : 'active';
     
-    if ($conn->query("UPDATE User SET User_Status = '$status' WHERE User_ID = '$uid'")) {
-        $message = "User " . ($status === 'suspended' ? "suspended" : "activated") . " successfully!";
-        $messageType = "success";
-    } else {
-        $message = "Failed to update user.";
-        $messageType = "danger";
-    }
+    updateData("users/{$uid}/status", $status);
+    $message = "User " . ($status === 'suspended' ? "suspended" : "activated") . " successfully!";
+    $messageType = "success";
 }
 
 // Delete user
 if (isset($_GET['delete']) && isset($_GET['id'])) {
-    $uid = $conn->real_escape_string($_GET['id']);
-    if ($conn->query("DELETE FROM User WHERE User_ID = '$uid'")) {
-        $message = "User deleted successfully!";
+    $uid = $_GET['id'];
+    $authError = '';
+    try {
+        // Attempt to delete from Firebase Auth (may fail if not in Auth)
+        $auth->deleteUser($uid);
+    } catch (\Exception $e) {
+        $authError = $e->getMessage();
+    }
+    try {
+        // Always delete from Firebase Realtime Database
+        deleteData("users/{$uid}");
+        $message = "User deleted successfully!" . ($authError ? " (Note: Auth removal skipped: {$authError})" : "");
         $messageType = "success";
-    } else {
-        $message = "Failed to delete user.";
+    } catch (\Exception $e) {
+        $message = "Failed to delete user from database: " . $e->getMessage();
         $messageType = "danger";
     }
 }
-
 
 // Search/filter
 $search = $_GET['search'] ?? '';
 $statusFilter = $_GET['status'] ?? '';
 $accTypeFilter = $_GET['acc_type'] ?? '';
 
-$where = [];
-if ($search) {
-    $searchEscaped = $conn->real_escape_string($search);
-    $where[] = "(User_FName LIKE '%$searchEscaped%' OR User_LName LIKE '%$searchEscaped%' OR User_Email LIKE '%$searchEscaped%' OR User_AccName LIKE '%$searchEscaped%')";
-}
-if ($statusFilter) {
-    $where[] = "User_Status = '" . $conn->real_escape_string($statusFilter) . "'";
-}
-if ($accTypeFilter) {
-    $where[] = "User_AccType = '" . $conn->real_escape_string($accTypeFilter) . "'";
+$users = [];
+$allUsers = getData('users');
+
+if ($allUsers) {
+    foreach ($allUsers as $uid => $userData) {
+        // Skip admin users
+        if (($userData['accountType'] ?? '') === 'admin') {
+            continue;
+        }
+        
+        $profile = $userData['profile'] ?? [];
+        
+        // Apply search filter
+        if ($search) {
+            $searchLower = strtolower($search);
+            $firstName = strtolower($profile['firstName'] ?? '');
+            $lastName = strtolower($profile['lastName'] ?? '');
+            $email = strtolower($profile['email'] ?? '');
+            $accountName = strtolower($profile['accountName'] ?? '');
+            
+            if (stripos($firstName, $searchLower) === false && 
+                stripos($lastName, $searchLower) === false && 
+                stripos($email, $searchLower) === false && 
+                stripos($accountName, $searchLower) === false) {
+                continue;
+            }
+        }
+        
+        // Apply status filter
+        if ($statusFilter && ($userData['status'] ?? '') !== $statusFilter) {
+            continue;
+        }
+        
+        // Apply account type filter
+        if ($accTypeFilter) {
+            $accType = $userData['accountType'] ?? '';
+            if ($accTypeFilter === 'individual' && $accType === 'seller') {
+                continue;
+            }
+            if ($accTypeFilter === 'business' && $accType !== 'seller') {
+                continue;
+            }
+        }
+        
+        $users[] = [
+            'User_ID' => $uid,
+            'User_FName' => $profile['firstName'] ?? '',
+            'User_LName' => $profile['lastName'] ?? '',
+            'User_AccName' => $profile['accountName'] ?? '',
+            'User_Email' => $profile['email'] ?? '',
+            'User_AccType' => $userData['accountType'] ?? 'buyer',
+            'User_Status' => $userData['status'] ?? 'active',
+            'User_DateReg' => $userData['dateRegistered'] ?? date('Y-m-d')
+        ];
+    }
 }
 
-$whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
-$query = "SELECT * FROM User $whereClause ORDER BY User_DateReg DESC";
-$users = $conn->query($query);
+// Sort by registration date descending
+usort($users, function($a, $b) {
+    return strtotime($b['User_DateReg']) - strtotime($a['User_DateReg']);
+});
 
 $title = "User Management";
 ?>
@@ -128,9 +178,11 @@ $title = "User Management";
                 <i class="bi bi-receipt"></i> Orders
             </a>
             <hr class="mx-3 my-3" style="border-color:rgba(255,255,255,0.1)">
+            <a href="../auth/logout.php" class="nav-link-custom d-block">
+                <i class="bi bi-box-arrow-right"></i> Logout
+            </a>
         </div>
     </div>
-</div>
 
     <!-- Main Content -->
     <div class="main-content">
@@ -202,8 +254,8 @@ $title = "User Management";
                         </tr>
                     </thead>
                     <tbody>
-                        <?php if ($users && $users->num_rows > 0): ?>
-                            <?php while ($user = $users->fetch_assoc()): ?>
+                        <?php if (!empty($users)): ?>
+                            <?php foreach ($users as $user): ?>
                                 <tr>
                                     <td><code><?= $user['User_ID'] ?></code></td>
                                     <td><?= htmlspecialchars($user['User_FName'] . ' ' . $user['User_LName']) ?></td>
@@ -242,7 +294,7 @@ $title = "User Management";
                                         </div>
                                     </td>
                                 </tr>
-                            <?php endwhile; ?>
+                            <?php endforeach; ?>
                         <?php else: ?>
                             <tr>
                                 <td colspan="8" class="text-center text-muted py-4">

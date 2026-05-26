@@ -1,26 +1,25 @@
 <?php
 require_once "includes/auth.php";
 requireAdminLogin();
-require_once "../config/db.php";
+require_once "../config/firebase.php";
 
 $message = '';
 $messageType = '';
 
 // Delete product
 if (isset($_GET['delete']) && isset($_GET['id'])) {
-    $pid = $conn->real_escape_string($_GET['id']);
-    if ($conn->query("DELETE FROM Product WHERE Prod_ID = '$pid'")) {
-        $message = "Product deleted successfully!";
-        $messageType = "success";
-    }
+    $pid = $_GET['id'];
+    deleteData("products/{$pid}");
+    $message = "Product deleted successfully!";
+    $messageType = "success";
 }
 
 // Toggle featured/status
 if (isset($_GET['toggle_status']) && isset($_GET['id'])) {
-    $pid = $conn->real_escape_string($_GET['id']);
+    $pid = $_GET['id'];
     $current = $_GET['current'];
     $new = $current === 'active' ? 'inactive' : 'active';
-    $conn->query("UPDATE Product SET Prod_Status = '$new' WHERE Prod_ID = '$pid'");
+    updateData("products/{$pid}/status", $new);
     $message = "Product status updated.";
     $messageType = "info";
 }
@@ -29,22 +28,48 @@ if (isset($_GET['toggle_status']) && isset($_GET['id'])) {
 $search = $_GET['search'] ?? '';
 $statusFilter = $_GET['status'] ?? '';
 
-$where = [];
-if ($search) {
-    $searchEscaped = $conn->real_escape_string($search);
-    $where[] = "(Prod_Title LIKE '%$searchEscaped%' OR Prod_Desc LIKE '%$searchEscaped%')";
-}
-if ($statusFilter) {
-    $where[] = "Prod_Status = '" . $conn->real_escape_string($statusFilter) . "'";
+$products = [];
+$productsData = getData('products');
+
+if ($productsData) {
+    foreach ($productsData as $prodId => $productData) {
+        // Apply search filter
+        if ($search) {
+            $title = $productData['title'] ?? '';
+            $desc = $productData['description'] ?? '';
+            if (stripos($title, $search) === false && stripos($desc, $search) === false) {
+                continue;
+            }
+        }
+        
+        // Apply status filter
+        if ($statusFilter && ($productData['status'] ?? '') !== $statusFilter) {
+            continue;
+        }
+        
+        // Get seller info
+        $sellerId = $productData['sellerId'] ?? '';
+        $userData = getData("users/{$sellerId}");
+        $profile = $userData['profile'] ?? [];
+        
+        $products[] = [
+            'Prod_ID' => $prodId,
+            'Prod_Title' => $productData['title'] ?? '',
+            'Prod_Desc' => $productData['description'] ?? '',
+            'Prod_Price' => $productData['price'] ?? 0,
+            'Prod_Image' => $productData['image'] ?? '',
+            'Prod_Status' => $productData['status'] ?? 'inactive',
+            'Prod_DateAdd' => $productData['dateAdded'] ?? date('Y-m-d'),
+            'User_FName' => $profile['firstName'] ?? 'Unknown',
+            'User_LName' => $profile['lastName'] ?? ''
+        ];
+    }
 }
 
-$whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
-$query = "SELECT p.*, u.User_FName, u.User_LName 
-          FROM Product p
-          LEFT JOIN User u ON p.Prod_SellID = u.User_ID
-          $whereClause 
-          ORDER BY p.Prod_DateAdd DESC";
-$products = $conn->query($query);
+// Sort by date added descending
+usort($products, function($a, $b) {
+    return strtotime($b['Prod_DateAdd']) - strtotime($a['Prod_DateAdd']);
+});
 
 $title = "Product Management";
 ?>
@@ -118,6 +143,9 @@ $title = "Product Management";
                 <i class="bi bi-receipt"></i> Orders
             </a>
             <hr class="mx-3 my-3" style="border-color:rgba(255,255,255,0.1)">
+            <a href="../auth/logout.php" class="nav-link-custom d-block">
+                <i class="bi bi-box-arrow-right"></i> Logout
+            </a>
         </div>
     </div>
 
@@ -174,8 +202,8 @@ $title = "Product Management";
                         <tr><th>Image</th><th>Title</th><th>Seller</th><th>Price</th><th>Status</th><th>Posted</th><th>Actions</th></tr>
                     </thead>
                     <tbody>
-                        <?php if ($products && $products->num_rows > 0): ?>
-                            <?php while ($product = $products->fetch_assoc()): ?>
+                        <?php if (!empty($products)): ?>
+                            <?php foreach ($products as $product): ?>
                                 <tr>
                                     <td><img src="<?= $product['Prod_Image'] ?? 'https://via.placeholder.com/50' ?>" class="product-img" onerror="this.src='https://via.placeholder.com/50'"></td>
                                     <td><strong><?= htmlspecialchars(substr($product['Prod_Title'], 0, 40)) ?></strong><?= strlen($product['Prod_Title']) > 40 ? '...' : '' ?></td>
@@ -196,7 +224,7 @@ $title = "Product Management";
                                         </div>
                                     </td>
                                 </tr>
-                            <?php endwhile; ?>
+                            <?php endforeach; ?>
                         <?php else: ?>
                             <tr><td colspan="7" class="text-center text-muted py-4">No products found.</td></tr>
                         <?php endif; ?>

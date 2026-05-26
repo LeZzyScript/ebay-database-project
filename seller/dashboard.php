@@ -1,52 +1,29 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     header('Location: ../auth/signin.php');
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-// Fetch Seller ID
-$sellId = null;
-$stmt = $conn->prepare("SELECT Sell_ID FROM Seller WHERE Sell_UserID = ?");
-$stmt->bind_param("s", $_SESSION['account_id']);
-$stmt->execute();
-$res = $stmt->get_result();
-if ($row = $res->fetch_assoc()) {
-    $sellId = $row['Sell_ID'];
-}
-$stmt->close();
+$uid = $_SESSION['firebase_uid'];
 
 // Fetch Products for this seller
 $products = [];
-if ($sellId) {
-    // Ensure table exists to prevent crash if visited before adding a product
-    $conn->query("CREATE TABLE IF NOT EXISTS Product (
-        Prod_ID     CHAR(8) PRIMARY KEY,
-        Prod_SellID CHAR(8) NOT NULL,
-        Prod_CatID  CHAR(8),
-        Prod_Title  VARCHAR(100) NOT NULL,
-        Prod_Desc   VARCHAR(255) NOT NULL,
-        Prod_Price  DECIMAL(10,2) NOT NULL,
-        Prod_Image  VARCHAR(255) DEFAULT NULL,
-        Prod_Stock  INT NOT NULL DEFAULT 0,
-        Prod_Status VARCHAR(10) NOT NULL DEFAULT 'active',
-        Prod_DateAdd DATE NOT NULL,
-        Prod_DateUpd DATE,
-        FOREIGN KEY (Prod_SellID) REFERENCES Seller(Sell_ID),
-        FOREIGN KEY (Prod_CatID) REFERENCES Category(Cat_ID)
-    )");
-
-    $stmt2 = $conn->prepare("SELECT * FROM Product WHERE Prod_SellID = ? ORDER BY Prod_DateAdd DESC");
-    $stmt2->bind_param("s", $sellId);
-    $stmt2->execute();
-    $prodRes = $stmt2->get_result();
-    while ($p = $prodRes->fetch_assoc()) {
-        $products[] = $p;
+$productsData = getData('products');
+if ($productsData) {
+    foreach ($productsData as $prodId => $prodData) {
+        if (($prodData['sellerId'] ?? '') === $uid) {
+            $products[] = array_merge(['Prod_ID' => $prodId], $prodData);
+        }
     }
-    $stmt2->close();
 }
+
+// Sort by date added descending
+usort($products, function($a, $b) {
+    return strtotime($b['dateAdded'] ?? '0') - strtotime($a['dateAdded'] ?? '0');
+});
 
 // Format sales figure with K/M abbreviation
 function fmtSales($n) {
@@ -58,36 +35,43 @@ function fmtSales($n) {
 // Fetch dynamic sales and rating
 $totalSales   = 0;
 $orderCount   = 0;
-$sellerRating = "0.0 ★";
+$sellerRating = "No ratings";
 
-if ($sellId) {
-    // Sales + order count
-    $stmtS = $conn->prepare("
-        SELECT SUM(oi.Item_Sub) as total_sales,
-               COUNT(DISTINCT o.Order_ID) as order_count
-        FROM OrderItem oi
-        JOIN Product p  ON oi.Item_ProdID  = p.Prod_ID
-        JOIN `Order` o  ON oi.Item_OrderID = o.Order_ID
-        WHERE p.Prod_SellID = ?
-    ");
-    $stmtS->bind_param("s", $sellId);
-    $stmtS->execute();
-    $salesRow   = $stmtS->get_result()->fetch_assoc();
-    $totalSales = $salesRow['total_sales'] ?? 0;
-    $orderCount = (int)($salesRow['order_count'] ?? 0);
-    $stmtS->close();
-    
-    // Rating
-    $stmtR = $conn->prepare("SELECT AVG(Feed_Rating) as avg_rating, COUNT(*) as c FROM Feedback WHERE Feed_SellID = ?");
-    $stmtR->bind_param("s", $sellId);
-    $stmtR->execute();
-    $resR = $stmtR->get_result()->fetch_assoc();
-    if ($resR['c'] > 0) {
-        $sellerRating = round($resR['avg_rating'], 1) . ' ★';
-    } else {
-        $sellerRating = "No ratings";
+// Calculate sales from orders
+$ordersData = getData('orders');
+if ($ordersData) {
+    foreach ($ordersData as $orderId => $orderData) {
+        $status = $orderData['status'] ?? 'Processing';
+        if ($status === 'Rejected') {
+            continue;
+        }
+        $orderItems = getData("orders/{$orderId}/items");
+        if ($orderItems) {
+            foreach ($orderItems as $itemId => $itemData) {
+                $productId = $itemData['productId'] ?? '';
+                $product = getData("products/{$productId}");
+                if ($product && ($product['sellerId'] ?? '') === $uid) {
+                    $totalSales += ($itemData['subtotal'] ?? 0);
+                }
+            }
+        }
+        $orderCount++;
     }
-    $stmtR->close();
+}
+
+// Calculate rating from feedbacks
+$feedbacksData = getData('feedbacks');
+if ($feedbacksData) {
+    $ratings = [];
+    foreach ($feedbacksData as $feedbackId => $feedbackData) {
+        if (($feedbackData['sellerId'] ?? '') === $uid) {
+            $ratings[] = $feedbackData['rating'] ?? 0;
+        }
+    }
+    if (count($ratings) > 0) {
+        $avgRating = array_sum($ratings) / count($ratings);
+        $sellerRating = round($avgRating, 1) . ' ★';
+    }
 }
 
 $title    = 'Seller Hub';
@@ -95,10 +79,19 @@ $basePath = '../';
 include('../layout/layout.php');
 ?>
 
+<?php if (!empty($_SESSION['flash'])): ?>
+<div style="max-width:1000px;margin:16px auto 0;padding:0 20px;">
+    <div style="background:#e8f5e9;border:1px solid #a5d6a7;border-radius:8px;padding:12px 16px;font-size:14px;color:#2e7d32;">
+        <i class="bi bi-check-circle-fill"></i> <?= htmlspecialchars($_SESSION['flash']) ?>
+    </div>
+</div>
+<?php unset($_SESSION['flash']); endif; ?>
+
 <!-- ══════════════════════════════════
      WELCOME STRIP
+     Notice that we adjusted margin here.
 ══════════════════════════════════ -->
-<div class="easy-strip" style="margin-top:12px;">
+<div class="easy-strip" style="margin-top:16px;">
     <div>
         <h2>Seller Hub Overview 📈</h2>
         <p>Welcome back, <?= htmlspecialchars($_SESSION['display_name'] ?? 'there') ?>. Here's a quick look at your business.</p>
@@ -168,23 +161,54 @@ include('../layout/layout.php');
                     <tr style="border-top:1px solid var(--border);">
                         <td style="padding:16px;">
                             <div style="display:flex; align-items:center; gap:16px;">
-                                <?php if (!empty($p['Prod_Image'])): ?>
-                                    <img src="<?= htmlspecialchars($p['Prod_Image']) ?>" alt="Product Image" style="width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--border); background:#f7f7f7;">
+                                <?php if (!empty($p['image'])): ?>
+                                    <a href="../product/product.php?id=<?= urlencode($p['Prod_ID']) ?>">
+                                        <img src="<?= htmlspecialchars($p['image']) ?>" alt="Product Image" style="width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--border); background:#f7f7f7;">
+                                    </a>
                                 <?php else: ?>
-                                    <div style="width:64px; height:64px; border-radius:8px; background:#f0f0f0; display:flex; align-items:center; justify-content:center; border:1px solid var(--border); color:var(--muted); font-size:24px;">📦</div>
+                                    <a href="../product/product.php?id=<?= urlencode($p['Prod_ID']) ?>" style="text-decoration:none;">
+                                        <div style="width:64px; height:64px; border-radius:8px; background:#f0f0f0; display:flex; align-items:center; justify-content:center; border:1px solid var(--border); color:var(--muted); font-size:24px;">📦</div>
+                                    </a>
                                 <?php endif; ?>
                                 <div>
-                                    <div style="font-weight:600; font-size:14px; margin-bottom:4px;"><?= htmlspecialchars($p['Prod_Title']) ?></div>
-                                    <div style="font-size:12px; color:var(--muted);">Item number: <?= htmlspecialchars($p['Prod_ID']) ?></div>
+                                    <div style="display:flex; align-items:center; flex-wrap:wrap; gap:6px;">
+                                        <a href="../product/product.php?id=<?= urlencode($p['Prod_ID']) ?>" style="font-weight:600; font-size:14px; text-decoration:none; color:var(--text); transition:color 0.15s;" onmouseover="this.style.color='var(--blue)'; this.style.textDecoration='underline'" onmouseout="this.style.color='var(--text)'; this.style.textDecoration='none'">
+                                            <?= htmlspecialchars($p['title'] ?? '') ?>
+                                        </a>
+                                        <?php 
+                                        $isAuc = isset($p['auctionData']);
+                                        $aucActive = $isAuc && ($p['auctionData']['status'] ?? '') === 'active';
+                                        if ($isAuc): 
+                                        ?>
+                                            <span style="font-size:10px; padding:2px 8px; border-radius:12px; font-weight:700; display:inline-flex; align-items:center; gap:2px; <?php echo $aucActive ? 'background:#e3f2fd; color:#1565c0; border:1px solid #bbdefb;' : 'background:#f5f5f5; color:#757575; border:1px solid #e0e0e0;'; ?>">
+                                                <?= $aucActive ? '⚡ Live Auction' : '🔒 Auction Ended' ?>
+                                            </span>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div style="font-size:12px; color:var(--muted); margin-top:2px;">Item number: <?= htmlspecialchars($p['Prod_ID']) ?></div>
                                 </div>
                             </div>
                         </td>
-                        <td style="padding:16px;">₱<?= number_format($p['Prod_Price'], 2) ?></td>
-                        <td style="padding:16px;"><?= htmlspecialchars($p['Prod_Stock']) ?></td>
+                        <td style="padding:16px;">
+                            ₱<?= number_format($p['price'] ?? 0, 2) ?>
+                            <?php if ($isAuc): ?>
+                                <div style="font-size:11px; color:var(--muted); margin-top:2px;">(Auction Start)</div>
+                            <?php endif; ?>
+                        </td>
+                        <td style="padding:16px;"><?= htmlspecialchars($p['stock'] ?? 0) ?></td>
                         <td style="padding:16px;">0</td>
                         <td style="padding:16px;">
-                            <div style="display:flex; gap:8px;">
+                            <div style="display:flex; gap:8px; align-items:center;">
                                 <a href="../product/edit-product.php?id=<?= urlencode($p['Prod_ID']) ?>" style="text-decoration:none; color:var(--text); border:1px solid var(--border); background:#fff; padding:6px 12px; border-radius:16px; font-size:12px; transition:background 0.2s;" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background='#fff'">Edit</a>
+                                
+                                <?php if ($aucActive): ?>
+                                    <form action="../auction/stop_auction.php" method="POST" style="margin:0;" onsubmit="return confirm('Are you sure you want to manually stop this auction?');">
+                                        <input type="hidden" name="auction_id" value="<?= htmlspecialchars($p['auctionData']['auctionId']) ?>">
+                                        <input type="hidden" name="redirect" value="../seller/dashboard.php">
+                                        <button type="submit" style="border:1px solid #ffeeba; background:#fff8e1; color:#856404; padding:6px 12px; border-radius:16px; cursor:pointer; font-family:var(--font); font-size:12px; font-weight:600; transition:background 0.2s;" onmouseover="this.style.background='#ffe082'" onmouseout="this.style.background='#fff8e1'">Stop Auction</button>
+                                    </form>
+                                <?php endif; ?>
+
                                 <form action="../product/delete-product.php" method="POST" style="margin:0;" onsubmit="return confirm('Are you sure you want to permanently delete this listing?');">
                                     <input type="hidden" name="prod_id" value="<?= htmlspecialchars($p['Prod_ID']) ?>">
                                     <button type="submit" style="border:1px solid var(--border); background:#fff; color:#e53238; padding:6px 12px; border-radius:16px; cursor:pointer; font-family:var(--font); font-size:12px; transition:background 0.2s;" onmouseover="this.style.background='#ffebe8'" onmouseout="this.style.background='#fff'">Delete</button>

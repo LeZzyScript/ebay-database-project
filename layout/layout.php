@@ -18,7 +18,7 @@ if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
-$isLoggedIn  = isset($_SESSION['account_id']);
+$isLoggedIn  = isset($_SESSION['firebase_uid']);
 $isSeller    = !empty($_SESSION['is_seller']);
 $isAdmin     = !empty($_SESSION['is_admin']);
 $displayName = htmlspecialchars($_SESSION['display_name'] ?? '');

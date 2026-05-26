@@ -5,37 +5,33 @@ if (!isset($_GET['id'])) {
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 $catId = $_GET['id'];
 
 // Fetch category details
-$category = null;
-$stmt = $conn->prepare("SELECT * FROM Category WHERE Cat_ID = ? AND Cat_Status = 'active'");
-$stmt->bind_param("s", $catId);
-$stmt->execute();
-$res = $stmt->get_result();
-if ($row = $res->fetch_assoc()) {
-    $category = $row;
-}
-$stmt->close();
+$category = getData("categories/{$catId}");
 
-if (!$category) {
+if (!$category || (isset($category['status']) && $category['status'] !== 'active')) {
     header('Location: categories.php');
     exit;
 }
 
 // Fetch products for this category
 $products = [];
-$stmt2 = $conn->prepare("SELECT * FROM Product WHERE Prod_CatID = ? ORDER BY Prod_DateAdd DESC");
-$stmt2->bind_param("s", $catId);
-$stmt2->execute();
-$res2 = $stmt2->get_result();
-while ($p = $res2->fetch_assoc()) {
-    $products[] = $p;
+$allProducts = getData('products');
+if ($allProducts) {
+    foreach ($allProducts as $prodId => $prodData) {
+        if (isset($prodData['categoryId']) && $prodData['categoryId'] === $catId) {
+            $products[] = array_merge(['Prod_ID' => $prodId], $prodData);
+        }
+    }
+    // Sort by dateAdded (descending)
+    usort($products, function($a, $b) {
+        return strtotime($b['dateAdded'] ?? '1970-01-01') - strtotime($a['dateAdded'] ?? '1970-01-01');
+    });
 }
-$stmt2->close();
 
-$title = htmlspecialchars($category['Cat_Name']) . " for Sale | eBay";
+$title = htmlspecialchars($category['name']) . " for Sale | eBay";
 $basePath = '../';
 include('../layout/layout.php');
 ?>
@@ -258,11 +254,11 @@ include('../layout/layout.php');
     <div class="breadcrumbs">
         <a href="../index.php">eBay</a> &gt; 
         <a href="categories.php">All Categories</a> &gt; 
-        <span style="color:var(--text);"><?= htmlspecialchars($category['Cat_Name']) ?></span>
+        <span style="color:var(--text);"><?= htmlspecialchars($category['name']) ?></span>
     </div>
 
     <div class="search-header">
-        <h1><?= htmlspecialchars($category['Cat_Name']) ?></h1>
+        <h1><?= htmlspecialchars($category['name']) ?></h1>
     </div>
 
     <div class="search-layout">
@@ -298,7 +294,7 @@ include('../layout/layout.php');
         <main class="main-results">
             <div class="results-toolbar">
                 <div class="results-count">
-                    <?= count($products) ?> result<?= count($products) !== 1 ? 's' : '' ?> for "<?= htmlspecialchars($category['Cat_Name']) ?>"
+                    <?= count($products) ?> result<?= count($products) !== 1 ? 's' : '' ?> for "<?= htmlspecialchars($category['name']) ?>"
                 </div>
                 <div>
                     <select class="sort-select">
@@ -315,19 +311,19 @@ include('../layout/layout.php');
                     <?php foreach ($products as $p): ?>
                         <div class="list-card">
                             <a href="../product/product.php?id=<?= urlencode($p['Prod_ID']) ?>" class="list-img-wrap" style="text-decoration:none;">
-                                <?php if (!empty($p['Prod_Image'])): ?>
-                                    <img src="<?= htmlspecialchars($p['Prod_Image']) ?>" alt="Product">
+                                <?php if (!empty($p['image'])): ?>
+                                    <img src="<?= htmlspecialchars($p['image']) ?>" alt="Product">
                                 <?php else: ?>
                                     <i class="bi bi-box placeholder-icon"></i>
                                 <?php endif; ?>
                             </a>
                             
                             <div class="list-details">
-                                <a href="../product/product.php?id=<?= urlencode($p['Prod_ID']) ?>" class="list-title"><?= htmlspecialchars($p['Prod_Title']) ?></a>
+                                <a href="../product/product.php?id=<?= urlencode($p['Prod_ID']) ?>" class="list-title"><?= htmlspecialchars($p['title']) ?></a>
                                 <div class="list-cond">Brand New</div>
                                 
                                 <div class="list-price-wrap">
-                                    <div class="list-price">₱<?= number_format($p['Prod_Price'], 2) ?></div>
+                                    <div class="list-price">₱<?= number_format($p['price'], 2) ?></div>
                                 </div>
                                 
                                 <div class="list-shipping">Free shipping</div>
@@ -337,7 +333,7 @@ include('../layout/layout.php');
                                     <button class="action-btn" onclick="addToCart(this, <?= htmlspecialchars(json_encode($p['Prod_ID']), ENT_QUOTES, 'UTF-8') ?>)">
                                         <i class="bi bi-cart-plus"></i> Add to cart
                                     </button>
-                                    <button class="action-btn wishlist-btn" onclick="toggleWish(this, <?= htmlspecialchars(json_encode($p['Prod_ID']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode(strip_tags($p['Prod_Title'])), ENT_QUOTES, 'UTF-8') ?>)">
+                                    <button class="action-btn wishlist-btn" onclick="toggleWish(this, <?= htmlspecialchars(json_encode($p['Prod_ID']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode(strip_tags($p['title'])), ENT_QUOTES, 'UTF-8') ?>)">
                                         <i class="bi bi-heart"></i> Watch
                                     </button>
                                 </div>
@@ -349,7 +345,7 @@ include('../layout/layout.php');
                 <div class="empty-state">
                     <i class="bi bi-search"></i>
                     <h3>No exact matches found</h3>
-                    <p style="color:var(--muted);">There are currently no active listings in this category. Check back later!</p>
+                    <p style="color:var(--muted);">There are currently no active listings in <?= htmlspecialchars($category['name']) ?>. Check back later!</p>
                 </div>
             <?php endif; ?>
         </main>

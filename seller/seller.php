@@ -1,26 +1,15 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id']) || empty($_SESSION['is_seller'])) {
+if (!isset($_SESSION['firebase_uid']) || empty($_SESSION['is_seller'])) {
     header('Location: ../buyer/dashboard.php');
     exit;
 }
 
-// Fetch user info from DB
-require_once('../config/db.php');
+// Fetch user info from Firebase
+require_once('../config/firebase.php');
 
-$user = null;
-$stmt = $conn->prepare('
-    SELECT u.*, s.*, b.* 
-    FROM User u 
-    LEFT JOIN Seller s ON u.User_ID = s.Sell_UserID
-    LEFT JOIN Business b ON s.Sell_ID = b.Bus_SellID
-    WHERE u.User_ID = ?
-');
-$stmt->bind_param('s', $_SESSION['account_id']);
-$stmt->execute();
-$user = $stmt->get_result()->fetch_assoc();
-$stmt->close();
-$conn->close();
+$uid = $_SESSION['firebase_uid'];
+$user = getData("users/{$uid}");
 
 if (!$user) {
     session_destroy();
@@ -28,16 +17,42 @@ if (!$user) {
     exit;
 }
 
-$title    = htmlspecialchars($user['User_AccName']) . " - Seller Profile";
+$profile = $user['profile'] ?? [];
+$sellerData = $user['sellerData'] ?? [];
+$business = $sellerData['business'] ?? [];
+
+$positivePercentage = 100;
+$totalFeedbacks = 0;
+$feedbacksData = getData('feedbacks') ?: [];
+if ($feedbacksData) {
+    $ratings = [];
+    foreach ($feedbacksData as $fId => $fData) {
+        if (($fData['sellerId'] ?? '') === $uid) {
+            $ratings[] = $fData['rating'] ?? 0;
+        }
+    }
+    $totalFeedbacks = count($ratings);
+    if ($totalFeedbacks > 0) {
+        $positiveCount = 0;
+        foreach ($ratings as $r) {
+            if ($r >= 4) $positiveCount++;
+        }
+        $positivePercentage = round(($positiveCount / $totalFeedbacks) * 100);
+    }
+}
+
+$title    = htmlspecialchars($profile['accountName'] ?? 'Seller') . " - Seller Profile";
 $basePath = '../';
 include('../layout/layout.php');
 
-$memberSince = date('M d, Y', strtotime($user['Sell_JoinDate']));
+$memberSince = date('M d, Y', strtotime($sellerData['joinDate'] ?? 'now'));
 $location    = 'Philippines';
 
-$initials     = strtoupper(substr($user['User_FName'], 0, 1) . substr($user['User_LName'], 0, 1));
+$firstName = $profile['firstName'] ?? '';
+$lastName = $profile['lastName'] ?? '';
+$initials     = strtoupper(substr($firstName, 0, 1) . substr($lastName, 0, 1));
 $avatarColors = ['#E53238', '#0064D2', '#3EBD30', '#8B5CF6', '#F5AF02', '#EC4899', '#06B6D4'];
-$avatarBg     = $avatarColors[ord($user['User_FName'][0]) % count($avatarColors)];
+$avatarBg     = $avatarColors[ord($firstName[0] ?? 'A') % count($avatarColors)];
 ?>
 
 <style>
@@ -188,14 +203,14 @@ $avatarBg     = $avatarColors[ord($user['User_FName'][0]) % count($avatarColors)
                 <div class="profile-avatar" style="background:<?= $avatarBg ?>"><?= $initials ?></div>
                 <div class="profile-details">
                     <div class="profile-username">
-                        <?= htmlspecialchars($user['User_AccName']) ?>
-                        <?php if ($user['Bus_Verified']): ?>
+                        <?= htmlspecialchars($profile['accountName'] ?? 'Seller') ?>
+                        <?php if ($business['verified'] ?? false): ?>
                             <span class="tag" style="background:#e8f4fd; color:var(--blue);">Verified Business</span>
                         <?php endif; ?>
                     </div>
                     <div class="profile-rating">
                         <span class="star-icon">⭐</span>
-                        <strong>100%</strong> positive Feedback (500+ items sold)
+                        <strong><?= $positivePercentage ?>%</strong> positive Feedback (<?= $totalFeedbacks ?> review<?= $totalFeedbacks !== 1 ? 's' : '' ?>)
                     </div>
                 </div>
             </div>
@@ -221,22 +236,22 @@ $avatarBg     = $avatarColors[ord($user['User_FName'][0]) % count($avatarColors)
         <h2 class="about-title">Business Information</h2>
         <div class="about-info">
             <div class="about-row">
-                Business Name: <strong><?= htmlspecialchars($user['Bus_Name']) ?></strong>
+                Business Name: <strong><?= htmlspecialchars($business['name'] ?? '') ?></strong>
             </div>
             <div class="about-row">
-                Business Type: <strong><?= htmlspecialchars(ucfirst($user['Bus_Type'])) ?></strong>
+                Business Type: <strong><?= htmlspecialchars(ucfirst($business['type'] ?? '')) ?></strong>
             </div>
             <div class="about-row">
-                Registration Num: <strong><?= htmlspecialchars($user['Bus_RegNum']) ?></strong>
+                Registration Num: <strong><?= htmlspecialchars($business['regNumber'] ?? $business['regNum'] ?? '') ?></strong>
             </div>
             <div class="about-row" style="margin-top:8px;">
                 <strong>Contact Details</strong>
             </div>
             <div class="about-row">
-                <?= htmlspecialchars($user['Bus_Phone']) ?>
+                <?= htmlspecialchars($business['phone'] ?? '') ?>
             </div>
             <div class="about-row">
-                <?= htmlspecialchars($user['Bus_Address']) ?>
+                <?= htmlspecialchars($business['address'] ?? '') ?>
             </div>
         </div>
     </div>
@@ -251,10 +266,10 @@ $avatarBg     = $avatarColors[ord($user['User_FName'][0]) % count($avatarColors)
                 Selling since: <strong><?= $memberSince ?></strong>
             </div>
             <div class="about-row">
-                Seller Type: <strong><?= htmlspecialchars(ucfirst($user['Sell_Type'])) ?></strong>
+                Seller Type: <strong><?= htmlspecialchars(ucfirst($sellerData['type'] ?? '')) ?></strong>
             </div>
             <div class="about-row">
-                Status: <strong><?= htmlspecialchars($user['Sell_Status']) ?></strong>
+                Status: <strong><?= htmlspecialchars($sellerData['status'] ?? '') ?></strong>
             </div>
             
             <hr style="border:none; border-top:1px solid var(--border); margin:8px 0;">
@@ -263,10 +278,10 @@ $avatarBg     = $avatarColors[ord($user['User_FName'][0]) % count($avatarColors)
                 <strong>Owner Details</strong>
             </div>
             <div class="about-row">
-                <?= htmlspecialchars($user['User_FName'].' '.$user['User_LName']) ?>
+                <?= htmlspecialchars($firstName.' '.$lastName) ?>
             </div>
             <div class="about-row">
-                <?= htmlspecialchars($user['User_Email']) ?>
+                <?= htmlspecialchars($profile['email'] ?? '') ?>
             </div>
         </div>
     </div>

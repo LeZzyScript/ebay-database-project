@@ -1,27 +1,25 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     header('Location: ../auth/signin.php');
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-$userId = $_SESSION['account_id'];
+$uid = $_SESSION['firebase_uid'];
 $errors  = [];
 $success = false;
 
-$stmt = $conn->prepare('SELECT * FROM User WHERE User_ID = ?');
-$stmt->bind_param('s', $userId);
-$stmt->execute();
-$user = $stmt->get_result()->fetch_assoc();
-$stmt->close();
+$user = getData("users/{$uid}");
 
 if (!$user) {
     session_destroy();
     header('Location: ../auth/signin.php');
     exit;
 }
+
+$profile = $user['profile'] ?? [];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!hash_equals($_SESSION['csrf_token'] ?? '', $_POST['csrf_token'] ?? '')) {
@@ -44,19 +42,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$address)                                    $errors[] = 'Address is required.';
 
         if (empty($errors)) {
-            $stmt = $conn->prepare('SELECT User_ID FROM User WHERE User_Email = ? AND User_ID != ?');
-            $stmt->bind_param('ss', $email, $userId);
-            $stmt->execute();
-            if ($stmt->get_result()->num_rows > 0) $errors[] = 'This email is already used by another account.';
-            $stmt->close();
+            // Check if email is already used by another user
+            $allUsers = getData('users');
+            if ($allUsers) {
+                foreach ($allUsers as $checkUid => $checkUser) {
+                    if ($checkUid !== $uid && isset($checkUser['profile']['email']) && $checkUser['profile']['email'] === $email) {
+                        $errors[] = 'This email is already used by another account.';
+                        break;
+                    }
+                }
+            }
         }
 
         if (empty($errors)) {
-            $stmt = $conn->prepare('SELECT User_ID FROM User WHERE User_AccName = ? AND User_ID != ?');
-            $stmt->bind_param('ss', $accname, $userId);
-            $stmt->execute();
-            if ($stmt->get_result()->num_rows > 0) $errors[] = 'This username is already taken.';
-            $stmt->close();
+            // Check if username is already taken by another user
+            $allUsers = getData('users');
+            if ($allUsers) {
+                foreach ($allUsers as $checkUid => $checkUser) {
+                    if ($checkUid !== $uid && isset($checkUser['profile']['accountName']) && strtolower($checkUser['profile']['accountName']) === strtolower($accname)) {
+                        $errors[] = 'This username is already taken.';
+                        break;
+                    }
+                }
+            }
         }
 
         if ($newPw !== '') {
@@ -65,32 +73,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if (empty($errors)) {
-            $stmt = $conn->prepare('UPDATE User SET User_FName=?, User_LName=?, User_AccName=?, User_Email=?, User_Contact=?, User_Address=? WHERE User_ID=?');
-            $stmt->bind_param('sssssss', $fname, $lname, $accname, $email, $contact, $address, $userId);
-            $stmt->execute();
-            $stmt->close();
+            // Update profile in Firebase
+            updateData("users/{$uid}/profile", [
+                'firstName' => $fname,
+                'lastName' => $lname,
+                'accountName' => $accname,
+                'email' => $email,
+                'contact' => $contact,
+                'address' => $address
+            ]);
 
+            // Update password in Firebase Auth if provided
             if ($newPw !== '') {
-                $hashed = password_hash($newPw, PASSWORD_BCRYPT);
-                $stmt = $conn->prepare('UPDATE User SET User_Password=? WHERE User_ID=?');
-                $stmt->bind_param('ss', $hashed, $userId);
-                $stmt->execute();
-                $stmt->close();
+                try {
+                    $auth->updateUser($uid, [
+                        'password' => $newPw
+                    ]);
+                } catch (\Exception $e) {
+                    $errors[] = 'Failed to update password: ' . $e->getMessage();
+                }
             }
 
-            $_SESSION['display_name'] = $fname;
-            $success = true;
+            if (empty($errors)) {
+                $_SESSION['display_name'] = $fname;
+                $success = true;
 
-            $stmt = $conn->prepare('SELECT * FROM User WHERE User_ID = ?');
-            $stmt->bind_param('s', $userId);
-            $stmt->execute();
-            $user = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
+                // Reload user data
+                $user = getData("users/{$uid}");
+                $profile = $user['profile'] ?? [];
+            }
         }
     }
 }
-
-$conn->close();
 
 $title    = 'Edit Profile';
 $basePath = '../';
@@ -273,36 +287,36 @@ include('../layout/layout.php');
             <div class="form-row">
                 <div class="form-group">
                     <label for="fname">First Name</label>
-                    <input type="text" id="fname" name="fname" value="<?= htmlspecialchars($user['User_FName']) ?>" required>
+                    <input type="text" id="fname" name="fname" value="<?= htmlspecialchars($profile['firstName'] ?? '') ?>" required>
                 </div>
                 <div class="form-group">
                     <label for="lname">Last Name</label>
-                    <input type="text" id="lname" name="lname" value="<?= htmlspecialchars($user['User_LName']) ?>" required>
+                    <input type="text" id="lname" name="lname" value="<?= htmlspecialchars($profile['lastName'] ?? '') ?>" required>
                 </div>
             </div>
 
             <div class="form-row">
                 <div class="form-group">
                     <label for="accname">Username</label>
-                    <input type="text" id="accname" name="accname" value="<?= htmlspecialchars($user['User_AccName']) ?>" required>
+                    <input type="text" id="accname" name="accname" value="<?= htmlspecialchars($profile['accountName'] ?? '') ?>" required>
                 </div>
                 <div class="form-group">
                     <label for="email">Email Address</label>
-                    <input type="email" id="email" name="email" value="<?= htmlspecialchars($user['User_Email']) ?>" required>
+                    <input type="email" id="email" name="email" value="<?= htmlspecialchars($profile['email'] ?? '') ?>" required>
                 </div>
             </div>
 
             <div class="form-row">
                 <div class="form-group">
                     <label for="contact">Contact Number</label>
-                    <input type="tel" id="contact" name="contact" value="<?= htmlspecialchars($user['User_Contact']) ?>" placeholder="09XXXXXXXXX" maxlength="11" required>
+                    <input type="tel" id="contact" name="contact" value="<?= htmlspecialchars($profile['contact'] ?? '') ?>" placeholder="09XXXXXXXXX" maxlength="11" required>
                 </div>
             </div>
 
             <div class="form-row full">
                 <div class="form-group">
                     <label for="address">Address</label>
-                    <textarea id="address" name="address" required><?= htmlspecialchars($user['User_Address']) ?></textarea>
+                    <textarea id="address" name="address" required><?= htmlspecialchars($profile['address'] ?? '') ?></textarea>
                 </div>
             </div>
         </div>

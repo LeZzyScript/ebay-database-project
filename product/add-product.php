@@ -1,45 +1,13 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id']) || empty($_SESSION['is_seller'])) {
+if (!isset($_SESSION['firebase_uid']) || empty($_SESSION['is_seller'])) {
     header('Location: ../buyer/dashboard.php');
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-// -------------------------------------------------------------
-// AUTO-SETUP: Create Product table if it doesn't exist
-// -------------------------------------------------------------
-$conn->query("CREATE TABLE IF NOT EXISTS Product (
-    Prod_ID     CHAR(8) PRIMARY KEY,
-    Prod_SellID CHAR(8) NOT NULL,
-    Prod_CatID  CHAR(8),
-    Prod_Title  VARCHAR(100) NOT NULL,
-    Prod_Desc   VARCHAR(255) NOT NULL,
-    Prod_Price  DECIMAL(10,2) NOT NULL,
-    Prod_Image  VARCHAR(255) DEFAULT NULL,
-    Prod_Stock  INT NOT NULL DEFAULT 0,
-    Prod_Status VARCHAR(10) NOT NULL DEFAULT 'active',
-    Prod_DateAdd DATE NOT NULL,
-    Prod_DateUpd DATE,
-    FOREIGN KEY (Prod_SellID) REFERENCES Seller(Sell_ID),
-    FOREIGN KEY (Prod_CatID) REFERENCES Category(Cat_ID)
-)");
-
-// Fetch seller's Sell_ID
-$sellId = null;
-$stmt = $conn->prepare("SELECT Sell_ID FROM Seller WHERE Sell_UserID = ?");
-$stmt->bind_param("s", $_SESSION['account_id']);
-$stmt->execute();
-$res = $stmt->get_result();
-if ($row = $res->fetch_assoc()) {
-    $sellId = $row['Sell_ID'];
-}
-$stmt->close();
-
-if (!$sellId) {
-    die("Seller profile not found.");
-}
+$uid = $_SESSION['firebase_uid'];
 
 $error = '';
 $success = '';
@@ -61,58 +29,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$title || !$catId || !$desc || $price <= 0 || $stock < 0 || ($isAuction && $aucStartPrice <= 0)) {
         $error = "Please fill in all required fields correctly.";
     } else {
-        // Generate PRODxxxx
-        $prodId = 'PROD0001';
-        $res = $conn->query("SELECT Prod_ID FROM Product ORDER BY Prod_ID DESC LIMIT 1");
-        if ($res && $row = $res->fetch_assoc()) {
-            $lastId = $row['Prod_ID'];
-            if (preg_match('/^PROD(\d{4})$/', $lastId, $matches)) {
-                $nextNum = intval($matches[1]) + 1;
-                $prodId = sprintf("PROD%04d", $nextNum);
-            }
+        // Generate product ID
+        $prodId = generateId('PROD');
+
+        // Insert product into Firebase
+        setData("products/{$prodId}", [
+            'title' => $title,
+            'description' => $desc,
+            'price' => $price,
+            'image' => $imageUrl,
+            'stock' => $stock,
+            'categoryId' => $catId,
+            'sellerId' => $uid,
+            'status' => 'active',
+            'dateAdded' => $today,
+            'dateUpdated' => $today
+        ]);
+
+        if ($isAuction) {
+            // Generate auction ID
+            $aucId = generateId('AUCT');
+            
+            $startDate = date('Y-m-d H:i:s');
+            $endDate = date('Y-m-d H:i:s', strtotime("+$aucDuration days"));
+            
+            // Insert auction into Firebase
+            setData("auctions/{$aucId}", [
+                'productId' => $prodId,
+                'startPrice' => $aucStartPrice,
+                'currentHighBid' => $aucStartPrice,
+                'startDate' => $startDate,
+                'endDate' => $endDate,
+                'status' => 'active'
+            ]);
+
+            // Link auctionData inside product node for details page query compatibility
+            updateData("products/{$prodId}/auctionData", [
+                'auctionId' => $aucId,
+                'startPrice' => $aucStartPrice,
+                'startDate' => $startDate,
+                'endDate' => $endDate,
+                'status' => 'active'
+            ]);
         }
 
-        $stmt = $conn->prepare("INSERT INTO Product (Prod_ID, Prod_SellID, Prod_CatID, Prod_Title, Prod_Desc, Prod_Price, Prod_Image, Prod_Stock, Prod_DateAdd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        $stmt->bind_param("sssssdsss", $prodId, $sellId, $catId, $title, $desc, $price, $imageUrl, $stock, $today);
-        
-        if ($stmt->execute()) {
-            if ($isAuction) {
-                // Generate AUCTxxxx
-                $aucId = 'AUCT0001';
-                $resAuc = $conn->query("SELECT Auc_ID FROM Auction ORDER BY Auc_ID DESC LIMIT 1");
-                if ($resAuc && $rowAuc = $resAuc->fetch_assoc()) {
-                    $lastAucId = $rowAuc['Auc_ID'];
-                    if (preg_match('/^AUCT(\d{4})$/', $lastAucId, $matches)) {
-                        $nextAucNum = intval($matches[1]) + 1;
-                        $aucId = sprintf("AUCT%04d", $nextAucNum);
-                    }
-                }
-                
-                $startDate = date('Y-m-d H:i:s');
-                $endDate = date('Y-m-d H:i:s', strtotime("+$aucDuration days"));
-                
-                $stmtA = $conn->prepare("INSERT INTO Auction (Auc_ID, Auc_ProdID, Auc_StartPrice, Auc_HighBid, Auc_StartDate, Auc_EndDate, Auc_Status) VALUES (?, ?, ?, 0, ?, ?, 'Active')");
-                $stmtA->bind_param("ssdss", $aucId, $prodId, $aucStartPrice, $startDate, $endDate);
-                $stmtA->execute();
-                $stmtA->close();
-            }
-
-            $_SESSION['flash'] = "Product '$title' added successfully!";
-            header("Location: ../seller/dashboard.php");
-            exit;
-        } else {
-            $error = "Failed to add product: " . $conn->error;
-        }
-        $stmt->close();
+        $_SESSION['flash'] = "Product '$title' added successfully!";
+        header("Location: ../seller/dashboard.php");
+        exit;
     }
 }
 
 // Fetch categories for the dropdown
 $categories = [];
-$catRes = $conn->query("SELECT Cat_ID, Cat_Name FROM Category WHERE Cat_Status = 'active' ORDER BY Cat_Name ASC");
-if ($catRes) {
-    while ($r = $catRes->fetch_assoc()) {
-        $categories[] = $r;
+$categoriesData = getData('categories');
+if ($categoriesData) {
+    foreach ($categoriesData as $catId => $catData) {
+        if (($catData['status'] ?? '') === 'active') {
+            $categories[] = [
+                'Cat_ID' => $catId,
+                'Cat_Name' => $catData['name'] ?? ''
+            ];
+        }
     }
 }
 

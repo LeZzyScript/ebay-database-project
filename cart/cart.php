@@ -1,31 +1,34 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     header('Location: ../auth/signin.php?redirect=cart/cart.php');
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-$userId = $_SESSION['account_id'];
+$uid = $_SESSION['firebase_uid'];
 
-// Fetch cart items joined with product info
+// Fetch cart items
+$cartItems = getData("carts/{$uid}/items");
 $items = [];
-$stmt = $conn->prepare("
-    SELECT c.Cart_ProdID, c.Cart_Qty,
-           p.Prod_Title, p.Prod_Price, p.Prod_Image, p.Prod_Stock, p.Prod_Status
-    FROM Cart c
-    JOIN Product p ON c.Cart_ProdID = p.Prod_ID
-    WHERE c.Cart_UserID = ?
-    ORDER BY c.Cart_DateAdd DESC
-");
-$stmt->bind_param("s", $userId);
-$stmt->execute();
-$res = $stmt->get_result();
-while ($row = $res->fetch_assoc()) {
-    $items[] = $row;
+
+if ($cartItems) {
+    foreach ($cartItems as $prodId => $cartData) {
+        $product = getData("products/{$prodId}");
+        if ($product) {
+            $items[] = [
+                'Cart_ProdID' => $prodId,
+                'Cart_Qty' => $cartData['quantity'] ?? 1,
+                'Prod_Title' => $product['title'] ?? '',
+                'Prod_Price' => $product['price'] ?? 0,
+                'Prod_Image' => $product['image'] ?? '',
+                'Prod_Stock' => $product['stock'] ?? 0,
+                'Prod_Status' => $product['status'] ?? 'active'
+            ];
+        }
+    }
 }
-$stmt->close();
 
 $total = array_sum(array_map(fn($i) => $i['Prod_Price'] * $i['Cart_Qty'], $items));
 

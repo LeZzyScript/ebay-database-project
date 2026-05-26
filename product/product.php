@@ -1,6 +1,6 @@
 <?php
 session_start();
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
 $prodId = trim($_GET['id'] ?? '');
 if (!$prodId) {
@@ -9,57 +9,14 @@ if (!$prodId) {
 }
 
 // Require login — redirect back here after sign-in
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     $redirect = urlencode('product/product.php?id=' . $prodId);
     header('Location: ../auth/signin.php?redirect=' . $redirect);
     exit;
 }
 
-$product = null;
-$stmt = $conn->prepare("
-    SELECT p.*,
-           c.Cat_Name, c.Cat_ID,
-           u.User_AccName, u.User_FName, u.User_LName
-    FROM Product p
-    LEFT JOIN Category c ON p.Prod_CatID = c.Cat_ID
-    LEFT JOIN Seller s   ON p.Prod_SellID = s.Sell_ID
-    LEFT JOIN User u     ON s.Sell_UserID = u.User_ID
-    WHERE p.Prod_ID = ?
-");
-$stmt->bind_param("s", $prodId);
-$stmt->execute();
-$res = $stmt->get_result();
-if ($row = $res->fetch_assoc()) {
-    $product = $row;
-}
-$stmt->close();
-
-$isAuction = false;
-$auction = null;
-$stmtA = $conn->prepare("SELECT * FROM Auction WHERE Auc_ProdID = ? AND Auc_Status IN ('Active','Ended')");
-$stmtA->bind_param("s", $prodId);
-$stmtA->execute();
-$resA = $stmtA->get_result();
-if ($row = $resA->fetch_assoc()) {
-    $isAuction = true;
-    $auction = $row;
-    // Auto-close expired auctions
-    if ($auction['Auc_Status'] === 'Active' && strtotime($auction['Auc_EndDate']) < time()) {
-        $conn->query("UPDATE Auction SET Auc_Status='Ended' WHERE Auc_ID='" . $conn->real_escape_string($auction['Auc_ID']) . "'");
-        $auction['Auc_Status'] = 'Ended';
-    }
-}
-$stmtA->close();
-
-// Fetch total bids from Bid table
-$totalBids = 0;
-if ($isAuction) {
-    $stmtB = $conn->prepare("SELECT COUNT(*) as c FROM Bid WHERE Bid_AucID = ?");
-    $stmtB->bind_param("s", $auction['Auc_ID']);
-    $stmtB->execute();
-    $totalBids = $stmtB->get_result()->fetch_assoc()['c'] ?? 0;
-    $stmtB->close();
-}
+// Fetch product data
+$product = getData("products/{$prodId}");
 
 if (!$product) {
     $_SESSION['flash'] = "Product not found.";
@@ -67,51 +24,110 @@ if (!$product) {
     exit;
 }
 
-// Fetch seller rating
+// Fetch category data if categoryId exists
+$category = null;
+if (isset($product['categoryId'])) {
+    $category = getData("categories/{$product['categoryId']}");
+}
+
+// Fetch seller data
+$seller = null;
+$sellerUser = null;
+if (isset($product['sellerId'])) {
+    $sellerId = $product['sellerId'];
+    // 1. Direct lookup by User ID
+    $userData = getData("users/{$sellerId}");
+    if ($userData && isset($userData['sellerData'])) {
+        $seller = $userData['sellerData'];
+        $sellerUser = $userData['profile'] ?? null;
+    } else {
+        // 2. Fallback search by Seller ID (e.g. SELL0001)
+        $allUsers = getData('users');
+        if ($allUsers) {
+            foreach ($allUsers as $uKey => $uData) {
+                if (isset($uData['sellerData']['sellerId']) && $uData['sellerData']['sellerId'] === $sellerId) {
+                    $seller = $uData['sellerData'];
+                    $sellerUser = $uData['profile'] ?? null;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// Check if auction
+$isAuction = false;
+$auction = null;
+if (isset($product['auctionData'])) {
+    $isAuction = true;
+    $auction = $product['auctionData'];
+    // Auto-close expired auctions
+    if ($auction['status'] === 'active' && strtotime($auction['endDate']) < time()) {
+        updateData("products/{$prodId}/auctionData/status", 'ended');
+        updateData("auctions/{$auction['auctionId']}/status", 'ended');
+        $auction['status'] = 'ended';
+    }
+    
+    // Count bids
+    $totalBids = 0;
+    $bids = getData("auctions/{$auction['auctionId']}/bids");
+    if ($bids) {
+        $totalBids = count($bids);
+    }
+}
+
+// Fetch seller rating (simplified - would need order/feedback data in production)
 $sellerRating = 0;
 $sellerReviews = 0;
-if (!empty($product['Prod_SellID'])) {
-    $stmtR = $conn->prepare("SELECT AVG(Feed_Rating) as avg_rating, COUNT(*) as review_count FROM Feedback WHERE Feed_SellID = ?");
-    $stmtR->bind_param("s", $product['Prod_SellID']);
-    $stmtR->execute();
-    $resR = $stmtR->get_result()->fetch_assoc();
-    $sellerRating = $resR['avg_rating'] ? round($resR['avg_rating'], 1) : 0;
-    $sellerReviews = $resR['review_count'] ?? 0;
-    $stmtR->close();
-}
 
 // Fetch related products — same category, exclude current
 $related = [];
-if (!empty($product['Prod_CatID'])) {
-    $stmt2 = $conn->prepare("SELECT * FROM Product WHERE Prod_CatID = ? AND Prod_ID != ? ORDER BY Prod_DateAdd DESC LIMIT 10");
-    $stmt2->bind_param("ss", $product['Prod_CatID'], $prodId);
-    $stmt2->execute();
-    $res2 = $stmt2->get_result();
-    while ($r = $res2->fetch_assoc()) { $related[] = $r; }
-    $stmt2->close();
+if (isset($product['categoryId'])) {
+    $allProducts = getData('products');
+    if ($allProducts) {
+        foreach ($allProducts as $relId => $relData) {
+            if ($relId !== $prodId && isset($relData['categoryId']) && $relData['categoryId'] === $product['categoryId']) {
+                $related[] = array_merge(['Prod_ID' => $relId], $relData);
+            }
+        }
+    }
 }
 // Fall back to latest products if not enough same-category results
 if (count($related) < 4) {
-    $stmt3 = $conn->prepare("SELECT * FROM Product WHERE Prod_ID != ? ORDER BY Prod_DateAdd DESC LIMIT 10");
-    $stmt3->bind_param("s", $prodId);
-    $stmt3->execute();
-    $res3 = $stmt3->get_result();
     $related = [];
-    while ($r = $res3->fetch_assoc()) { $related[] = $r; }
-    $stmt3->close();
+    $allProducts = getData('products');
+    if ($allProducts) {
+        foreach ($allProducts as $relId => $relData) {
+            if ($relId !== $prodId) {
+                $related[] = array_merge(['Prod_ID' => $relId], $relData);
+            }
+        }
+    }
+    // Sort by dateAdded
+    usort($related, function($a, $b) {
+        return strtotime($b['dateAdded'] ?? '1970-01-01') - strtotime($a['dateAdded'] ?? '1970-01-01');
+    });
+    $related = array_slice($related, 0, 10);
 }
 
 // Check if already in wishlist
 $isWishlisted = false;
-if (isset($_SESSION['account_id'])) {
-    $wStmt = $conn->prepare("SELECT 1 FROM Wishlist WHERE Wish_UserID = ? AND Wish_ProdID = ?");
-    $wStmt->bind_param("ss", $_SESSION['account_id'], $prodId);
-    $wStmt->execute();
-    $isWishlisted = (bool)$wStmt->get_result()->fetch_row();
-    $wStmt->close();
+$uid = getCurrentUserId();
+if ($uid) {
+    $wishlist = getData("wishlists/{$uid}/items/{$prodId}");
+    $isWishlisted = ($wishlist !== null);
 }
 
-$title    = htmlspecialchars($product['Prod_Title']);
+$isOwner = false;
+if ($uid && isset($product['sellerId'])) {
+    $currentUser = getData("users/{$uid}");
+    $currentSellerId = $currentUser['sellerData']['sellerId'] ?? '';
+    if ($uid === $product['sellerId'] || ($currentSellerId && $currentSellerId === $product['sellerId'])) {
+        $isOwner = true;
+    }
+}
+
+$title    = htmlspecialchars($product['title']);
 $basePath = '../';
 include('../layout/layout.php');
 ?>
@@ -212,7 +228,7 @@ include('../layout/layout.php');
     margin-bottom: 20px;
 }
 .pdp-stock span {
-    color: <?php echo ($product['Prod_Stock'] > 0) ? '#2e7d32' : 'var(--red)'; ?>;
+    color: <?php echo (($product['stock'] ?? 0) > 0) ? '#2e7d32' : 'var(--red)'; ?>;
     font-weight: 600;
 }
 .pdp-divider {
@@ -345,12 +361,12 @@ include('../layout/layout.php');
     <!-- Breadcrumb -->
     <div class="pdp-breadcrumb">
         <a href="../index.php">eBay</a> &rsaquo;
-        <?php if ($product['Cat_Name']): ?>
-            <a href="../category/category.php?id=<?= urlencode($product['Cat_ID']) ?>">
-                <?= htmlspecialchars($product['Cat_Name']) ?>
+        <?php if ($category): ?>
+            <a href="../category/category.php?id=<?= urlencode($product['categoryId']) ?>">
+                <?= htmlspecialchars($category['name']) ?>
             </a> &rsaquo;
         <?php endif; ?>
-        <span><?= htmlspecialchars($product['Prod_Title']) ?></span>
+        <span><?= htmlspecialchars($product['title']) ?></span>
     </div>
 
     <div class="pdp-layout">
@@ -358,8 +374,8 @@ include('../layout/layout.php');
         <!-- Image Column -->
         <div class="pdp-img-col">
             <div class="pdp-img-main">
-                <?php if (!empty($product['Prod_Image'])): ?>
-                    <img src="<?= htmlspecialchars($product['Prod_Image']) ?>" alt="<?= htmlspecialchars($product['Prod_Title']) ?>">
+                <?php if (!empty($product['image'])): ?>
+                    <img src="<?= htmlspecialchars($product['image']) ?>" alt="<?= htmlspecialchars($product['title']) ?>">
                 <?php else: ?>
                     <i class="bi bi-box"></i>
                 <?php endif; ?>
@@ -369,17 +385,17 @@ include('../layout/layout.php');
         <!-- Info Column -->
         <div class="pdp-info-col">
             <div class="pdp-cond">Brand New</div>
-            <h1 class="pdp-title"><?= htmlspecialchars($product['Prod_Title']) ?></h1>
+            <h1 class="pdp-title"><?= htmlspecialchars($product['title']) ?></h1>
 
             <div class="pdp-price-row">
-                <span class="pdp-price">₱<?= number_format($product['Prod_Price'], 2) ?></span>
+                <span class="pdp-price">₱<?= number_format($product['price'], 2) ?></span>
             </div>
             <div class="pdp-shipping">Free shipping</div>
             <div class="pdp-returns">Free returns</div>
 
             <div class="pdp-stock">
-                <?php if ($product['Prod_Stock'] > 0): ?>
-                    <span><?= $product['Prod_Stock'] ?> available</span>
+                <?php if (($product['stock'] ?? 0) > 0): ?>
+                    <span><?= $product['stock'] ?> available</span>
                 <?php else: ?>
                     <span>Out of stock</span>
                 <?php endif; ?>
@@ -387,11 +403,24 @@ include('../layout/layout.php');
 
             <hr class="pdp-divider">
 
+            <?php if ($isOwner): ?>
+                <div style="background: #fdfdfd; border: 1.5px solid var(--border); border-radius: 12px; padding: 16px; text-align: center; margin-bottom: 20px;">
+                    <p style="font-size: 14px; font-weight: 600; color: var(--muted); margin-bottom: 10px;"><i class="bi bi-shield-check" style="color:var(--blue);"></i> This is your product listing.</p>
+                    <div style="display:flex; gap:8px;">
+                        <a href="edit-product.php?id=<?= urlencode($prodId) ?>" class="pdp-btn pdp-btn-buy" style="text-decoration: none; display: block; margin-bottom: 0; padding: 10px; font-size: 14px; flex: 1;">Edit Listing</a>
+                        <form action="delete-product.php" method="POST" onsubmit="return confirm('Are you sure you want to permanently delete this listing?');" style="margin:0; flex: 1;">
+                            <input type="hidden" name="prod_id" value="<?= htmlspecialchars($prodId) ?>">
+                            <button type="submit" class="pdp-btn" style="background:#fff; color:#e53238; border:1px solid #e53238; margin:0; width: 100%; font-family: var(--font); padding: 10px; font-size: 14px;">Delete Listing</button>
+                        </form>
+                    </div>
+                </div>
+            <?php endif; ?>
+
             <?php if ($isAuction): ?>
                 <?php
-                $currentBid = $auction['Auc_HighBid'] > 0 ? $auction['Auc_HighBid'] : $auction['Auc_StartPrice'];
+                $currentBid = ($auction['currentHighBid'] ?? 0) > 0 ? ($auction['currentHighBid'] ?? 0) : ($auction['startPrice'] ?? 0);
                 $minBid = $totalBids > 0 ? $currentBid + 10 : $currentBid; // Minimum bid increment is 10
-                $endTime = strtotime($auction['Auc_EndDate']);
+                $endTime = strtotime($auction['endDate']);
                 $timeLeft = $endTime - time();
                 
                 $days = floor($timeLeft / 86400);
@@ -400,73 +429,107 @@ include('../layout/layout.php');
                 $timeString = $days > 0 ? "{$days}d {$hours}h left" : "{$hours}h {$mins}m left";
                 if ($timeLeft < 0) $timeString = "Ended";
                 ?>
-                <div style="background:#f7f7f7; padding:16px; border-radius:8px; margin-bottom:16px; border:1px solid var(--border);">
+                <div style="background:#f7f7f7; padding:16px; border-radius:8px; margin-bottom:16px; border:1px solid var(--border);" id="pdp-auction-panel">
                     <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
                         <span style="font-size:14px; color:var(--muted);">Current Bid:</span>
-                        <span style="font-weight:600; font-size:14px;"><?= $totalBids ?> bids</span>
+                        <span style="font-weight:600; font-size:14px;" id="pdp-bid-count"><?= $totalBids ?> bids</span>
                     </div>
-                    <div style="font-size:32px; font-weight:700; margin-bottom:12px;">₱<?= number_format($currentBid, 2) ?></div>
+                    <div style="font-size:32px; font-weight:700; margin-bottom:12px;" id="pdp-bid-price">₱<?= number_format($currentBid, 2) ?></div>
                     <div style="font-size:14px; color:var(--muted); margin-bottom:16px;">
-                        <i class="bi bi-clock-history"></i> <?= $timeString ?> (<?= date('M j, g:i A', $endTime) ?>)
+                        <i class="bi bi-clock-history"></i> <span id="pdp-countdown-timer"><?= $timeString ?></span> <span id="pdp-end-date-string">(<?= date('M j, g:i A', $endTime) ?>)</span>
                     </div>
                     
-                    <?php if ($timeLeft > 0): ?>
-                    <form method="POST" action="../auction/place_bid.php" style="display:flex; gap:8px;">
-                        <input type="hidden" name="prod_id" value="<?= htmlspecialchars($prodId) ?>">
-                        <input type="number" name="bid_amount" min="<?= $minBid ?>" step="0.01" class="form-control" style="width:100px; padding:10px; border:1px solid var(--border); border-radius:24px; text-align:center;" value="<?= $minBid ?>">
-                        <button type="submit" class="pdp-btn pdp-btn-buy" style="margin:0; flex:1;">Place Bid</button>
-                    </form>
-                    <div style="font-size:12px; color:var(--muted); text-align:center; margin-top:8px;">Enter ₱<?= number_format($minBid, 2) ?> or more</div>
-                    <a href="../auction/auction.php?id=<?= urlencode($auction['Auc_ID']) ?>" style="display:block; text-align:center; margin-top:12px; font-size:13px; color:var(--blue);"><i class="bi bi-arrow-up-right-square"></i> View full auction page &rarr;</a>
-                    <?php else: ?>
-                    <button class="pdp-btn" style="background:#e0e0e0; color:var(--muted); margin:0;" disabled>Auction Ended</button>
-                    <?php endif; ?>
-                </div>
-            <?php else: ?>
-                <?php if ($product['Prod_Stock'] > 0): ?>
-                <div class="pdp-qty-row">
-                    <label for="pdpQty" style="font-size:14px;font-weight:600;">Quantity:</label>
-                    <div style="display:flex;align-items:center;gap:8px;margin-top:6px;margin-bottom:16px;">
-                        <button class="qty-btn" onclick="adjustQty(-1)" type="button">−</button>
-                        <input id="pdpQty" type="number" value="1" min="1" max="<?= $product['Prod_Stock'] ?>"
-                               style="width:52px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:6px;font-size:15px;font-weight:600;">
-                        <button class="qty-btn" onclick="adjustQty(1)" type="button">+</button>
-                        <span style="font-size:13px;color:var(--muted);"><?= $product['Prod_Stock'] ?> available</span>
+                    <div id="pdp-bidding-area">
+                        <?php if ($timeLeft > 0): ?>
+                            <?php if ($isOwner): ?>
+                                <div style="display:flex; gap:8px; margin-bottom: 8px;">
+                                    <input type="number" id="pdp-bid-amount" disabled class="form-control" style="width:100px; padding:10px; border:1px solid var(--border); border-radius:24px; text-align:center; background:#f0f0f0; cursor:not-allowed;" value="<?= $minBid ?>">
+                                    <button class="pdp-btn" style="margin:0; flex:1; background:#c7c7c7; border-color:#c7c7c7; color:#fff; cursor:not-allowed;" disabled>Place Bid</button>
+                                </div>
+                                <div style="font-size:12px; color:var(--muted); text-align:center;">Sellers cannot place bids on their own auctions.</div>
+                                <?php if (($auction['status'] ?? '') === 'active'): ?>
+                                    <form action="../auction/stop_auction.php" method="POST" style="margin-top:12px;" onsubmit="return confirm('Are you sure you want to manually stop this auction?');">
+                                        <input type="hidden" name="auction_id" value="<?= htmlspecialchars($auction['auctionId']) ?>">
+                                        <input type="hidden" name="redirect" value="../product/product.php?id=<?= urlencode($prodId) ?>">
+                                        <button type="submit" class="pdp-btn" style="background:#fff8e1; border:1px solid #ffeeba; color:#856404; font-weight:600; margin:0; width:100%; cursor:pointer;"><i class="bi bi-stop-circle"></i> Stop Auction Manually</button>
+                                    </form>
+                                <?php endif; ?>
+                            <?php else: ?>
+                                <form method="POST" action="../auction/place_bid.php" style="display:flex; gap:8px;" id="pdp-bid-form">
+                                    <input type="hidden" name="prod_id" value="<?= htmlspecialchars($prodId) ?>">
+                                    <input type="number" name="bid_amount" id="pdp-bid-amount" min="<?= $minBid ?>" step="0.01" class="form-control" style="width:100px; padding:10px; border:1px solid var(--border); border-radius:24px; text-align:center;" value="<?= $minBid ?>">
+                                    <button type="submit" class="pdp-btn pdp-btn-buy" style="margin:0; flex:1;" id="pdp-place-bid-btn">Place Bid</button>
+                                </form>
+                                <div style="font-size:12px; color:var(--muted); text-align:center; margin-top:8px;" id="pdp-bid-hint">Enter ₱<?= number_format($minBid, 2) ?> or more</div>
+                            <?php endif; ?>
+                            <a href="../auction/auction.php?id=<?= urlencode($auction['auctionId']) ?>" style="display:block; text-align:center; margin-top:12px; font-size:13px; color:var(--blue);"><i class="bi bi-arrow-up-right-square"></i> View full auction page & bid history &rarr;</a>
+                        <?php else: ?>
+                            <button class="pdp-btn" style="background:#e0e0e0; color:var(--muted); margin:0;" disabled>Auction Ended</button>
+                        <?php endif; ?>
                     </div>
                 </div>
-                
-                <form method="GET" action="../checkout/checkout.php" style="margin-bottom: 12px;">
-                    <input type="hidden" name="buy_now" value="<?= htmlspecialchars($product['Prod_ID']) ?>">
-                    <input type="hidden" name="qty" id="buyNowQty" value="1">
-                    <button type="submit" class="pdp-btn pdp-btn-buy" style="margin-bottom: 0;">Buy It Now</button>
-                </form>
-                
-                <button class="pdp-btn pdp-btn-cart" id="addToCartBtn"
-                        onclick="addToCart(<?= htmlspecialchars(json_encode($product['Prod_ID']), ENT_QUOTES, 'UTF-8') ?>)">
-                    <i class="bi bi-cart-plus"></i> Add to cart
-                </button>
+            <?php else: ?>
+                <?php if (($product['stock'] ?? 0) > 0): ?>
+                    <?php if ($isOwner): ?>
+                        <div class="pdp-qty-row">
+                            <label style="font-size:14px;font-weight:600;">Quantity:</label>
+                            <div style="display:flex;align-items:center;gap:8px;margin-top:6px;margin-bottom:16px;">
+                                <button class="qty-btn" style="cursor:not-allowed; opacity:0.5;" type="button" disabled>−</button>
+                                <input type="number" value="1" disabled style="width:52px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:6px;font-size:15px;font-weight:600;background:#f0f0f0;cursor:not-allowed;">
+                                <button class="qty-btn" style="cursor:not-allowed; opacity:0.5;" type="button" disabled>+</button>
+                                <span style="font-size:13px;color:var(--muted);"><?= $product['stock'] ?? 0 ?> available</span>
+                            </div>
+                        </div>
+                        <button class="pdp-btn" style="background:#c7c7c7; color:#fff; border:none; cursor:not-allowed; margin-bottom: 12px;" disabled>Buy It Now (Disabled)</button>
+                        <button class="pdp-btn" style="background:#fff; color:#c7c7c7; border:1px solid #e0e0e0; cursor:not-allowed; margin-bottom: 0;" disabled><i class="bi bi-cart-plus"></i> Add to cart (Disabled)</button>
+                    <?php else: ?>
+                        <div class="pdp-qty-row">
+                            <label for="pdpQty" style="font-size:14px;font-weight:600;">Quantity:</label>
+                            <div style="display:flex;align-items:center;gap:8px;margin-top:6px;margin-bottom:16px;">
+                                <button class="qty-btn" onclick="adjustQty(-1)" type="button">−</button>
+                                <input id="pdpQty" type="number" value="1" min="1" max="<?= $product['stock'] ?? 0 ?>"
+                                       style="width:52px;text-align:center;border:1px solid var(--border);border-radius:6px;padding:6px;font-size:15px;font-weight:600;">
+                                <button class="qty-btn" onclick="adjustQty(1)" type="button">+</button>
+                                <span style="font-size:13px;color:var(--muted);"><?= $product['stock'] ?? 0 ?> available</span>
+                            </div>
+                        </div>
+                        
+                        <form method="GET" action="../checkout/checkout.php" style="margin-bottom: 12px;">
+                            <input type="hidden" name="buy_now" value="<?= htmlspecialchars($prodId) ?>">
+                            <input type="hidden" name="qty" id="buyNowQty" value="1">
+                            <button type="submit" class="pdp-btn pdp-btn-buy" style="margin-bottom: 0;">Buy It Now</button>
+                        </form>
+                        
+                        <button class="pdp-btn pdp-btn-cart" id="addToCartBtn"
+                                onclick="addToCart(<?= htmlspecialchars(json_encode($prodId), ENT_QUOTES, 'UTF-8') ?>)">
+                            <i class="bi bi-cart-plus"></i> Add to cart
+                        </button>
+                    <?php endif; ?>
                 <?php else: ?>
-                <button class="pdp-btn" style="background:#e0e0e0;color:var(--muted);cursor:not-allowed;" disabled>
-                    Out of stock
-                </button>
+                    <button class="pdp-btn" style="background:#e0e0e0;color:var(--muted);cursor:not-allowed;" disabled>
+                        Out of stock
+                    </button>
                 <?php endif; ?>
             <?php endif; ?>
 
-            <button class="pdp-btn pdp-btn-watch" id="watchBtn"
-                    onclick="toggleWish(this, <?= htmlspecialchars(json_encode($product['Prod_ID']), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($product['Prod_Title']), ENT_QUOTES, 'UTF-8') ?>)">
-                <?php if ($isWishlisted): ?>
-                    <i class="bi bi-heart-fill" style="color:var(--red)"></i> Watching
-                <?php else: ?>
-                    <i class="bi bi-heart"></i> Watch this item
-                <?php endif; ?>
-            </button>
+            <?php if ($isOwner): ?>
+                <button class="pdp-btn pdp-btn-watch" style="opacity:0.6; cursor:not-allowed;" disabled>
+                    <i class="bi bi-heart"></i> Watch this item (Disabled)
+                </button>
+            <?php else: ?>
+                <button class="pdp-btn pdp-btn-watch" id="watchBtn"
+                        onclick="toggleWish(this, <?= htmlspecialchars(json_encode($prodId), ENT_QUOTES, 'UTF-8') ?>, <?= htmlspecialchars(json_encode($product['title']), ENT_QUOTES, 'UTF-8') ?>)">
+                    <?php if ($isWishlisted): ?>
+                        <i class="bi bi-heart-fill" style="color:var(--red)"></i> Watching
+                    <?php else: ?>
+                        <i class="bi bi-heart"></i> Watch this item
+                    <?php endif; ?>
+                </button>
+            <?php endif; ?>
 
             <!-- Seller Info -->
             <?php
-            $sellerName = $product['User_AccName']
-                ?? trim(($product['User_FName'] ?? '') . ' ' . ($product['User_LName'] ?? ''))
-                ?: 'Unknown Seller';
-                
+            $sellerName = $sellerUser['accountName'] ?? trim(($sellerUser['firstName'] ?? '') . ' ' . ($sellerUser['lastName'] ?? '')) ?: 'Unknown Seller';
             $ratingText = $sellerReviews > 0 ? "{$sellerRating} / 5.0 ★ ({$sellerReviews} reviews)" : "No reviews yet";
             ?>
             <div class="pdp-seller-box">
@@ -480,13 +543,13 @@ include('../layout/layout.php');
     <!-- Description -->
     <div class="pdp-desc-section">
         <div class="pdp-desc-title">Item description from the seller</div>
-        <div class="pdp-desc-body"><?= htmlspecialchars($product['Prod_Desc']) ?></div>
+        <div class="pdp-desc-body"><?= htmlspecialchars($product['description']) ?></div>
         <div class="pdp-meta">
-            Listed on: <?= date('F j, Y', strtotime($product['Prod_DateAdd'])) ?>
-            <?php if (!empty($product['Cat_Name'])): ?>
-                &nbsp;&bull;&nbsp; Category: <?= htmlspecialchars($product['Cat_Name']) ?>
+            Listed on: <?= date('F j, Y', strtotime($product['dateAdded'])) ?>
+            <?php if ($category): ?>
+                &nbsp;&bull;&nbsp; Category: <?= htmlspecialchars($category['name']) ?>
             <?php endif; ?>
-            &nbsp;&bull;&nbsp; Item ID: <?= htmlspecialchars($product['Prod_ID']) ?>
+            &nbsp;&bull;&nbsp; Item ID: <?= htmlspecialchars($prodId) ?>
         </div>
     </div>
 
@@ -495,24 +558,24 @@ include('../layout/layout.php');
     <div class="pdp-related">
         <div class="pdp-related-head">
             <h2>Similar items you might like</h2>
-            <?php if (!empty($product['Cat_ID'])): ?>
-                <a href="../category/category.php?id=<?= urlencode($product['Cat_ID']) ?>">See all in <?= htmlspecialchars($product['Cat_Name']) ?> &rsaquo;</a>
+            <?php if ($category): ?>
+                <a href="../category/category.php?id=<?= urlencode($product['categoryId']) ?>">See all in <?= htmlspecialchars($category['name']) ?> &rsaquo;</a>
             <?php endif; ?>
         </div>
         <div class="scroll-row">
             <?php foreach ($related as $r): ?>
                 <a href="product.php?id=<?= urlencode($r['Prod_ID']) ?>" class="prod-card" style="text-decoration:none; color:inherit; transition:transform 0.2s, box-shadow 0.2s;">
                         <div class="prod-img">
-                            <?php if (!empty($r['Prod_Image'])): ?>
-                                <img src="<?= htmlspecialchars($r['Prod_Image']) ?>" alt="<?= htmlspecialchars($r['Prod_Title']) ?>" style="width:100%;height:100%;object-fit:cover;">
+                            <?php if (!empty($r['image'])): ?>
+                                <img src="<?= htmlspecialchars($r['image']) ?>" alt="<?= htmlspecialchars($r['title']) ?>" style="width:100%;height:100%;object-fit:cover;">
                             <?php else: ?>
                                 <i class="bi bi-box" style="font-size:5rem;color:var(--muted);"></i>
                             <?php endif; ?>
                         </div>
                         <p class="prod-cond">Brand New</p>
-                        <p class="prod-name"><?= htmlspecialchars($r['Prod_Title']) ?></p>
+                        <p class="prod-name"><?= htmlspecialchars($r['title']) ?></p>
                         <div class="prod-prices">
-                            <span class="prod-price">₱<?= number_format($r['Prod_Price'], 2) ?></span>
+                            <span class="prod-price">₱<?= number_format($r['price'], 2) ?></span>
                         </div>
                 </a>
             <?php endforeach; ?>
@@ -524,7 +587,7 @@ include('../layout/layout.php');
 <?php include('../layout/footer.php'); ?>
 
 <script>
-const MAX_STOCK = <?= (int)$product['Prod_Stock'] ?>;
+const MAX_STOCK = <?= (int)($product['stock'] ?? 0) ?>;
 
 function adjustQty(delta) {
     const inp = document.getElementById('pdpQty');
@@ -595,4 +658,84 @@ function toggleWish(btn, prodId, name) {
     })
     .catch(() => { showToast('Something went wrong'); btn.disabled = false; });
 }
+
+<?php if ($isAuction): ?>
+// Live countdown timer in JS (client-side tick)
+let endTimeMs = <?= $endTime * 1000 ?>;
+let isAuctionActive = <?= $auction['status'] === 'active' && $timeLeft > 0 ? 'true' : 'false' ?>;
+let pollTimer = null;
+
+function updatePdpCountdown() {
+    if (!isAuctionActive) return;
+    let rem = Math.floor((endTimeMs - Date.now()) / 1000);
+    if (rem <= 0) {
+        document.getElementById('pdp-countdown-timer').textContent = 'Ended';
+        isAuctionActive = false;
+        setAuctionEndedUI();
+        if (pollTimer) clearInterval(pollTimer);
+        return;
+    }
+    let d = Math.floor(rem / 86400);
+    let h = Math.floor((rem % 86400) / 3600);
+    let m = Math.floor((rem % 3600) / 60);
+    let s = rem % 60;
+    document.getElementById('pdp-countdown-timer').textContent = d > 0
+        ? `${d}d ${h}h ${m}m left`
+        : `${h}h ${m}m ${s}s left`;
+}
+
+function setAuctionEndedUI() {
+    document.getElementById('pdp-countdown-timer').textContent = 'Ended';
+    const bidArea = document.getElementById('pdp-bidding-area');
+    if (bidArea) {
+        bidArea.innerHTML = '<button class="pdp-btn" style="background:#e0e0e0; color:var(--muted); margin:0;" disabled>Auction Ended</button>';
+    }
+}
+
+function pollPdpAuction() {
+    if (!isAuctionActive) return;
+    fetch('../auction/get_bid.php?prod_id=' + encodeURIComponent('<?= $prodId ?>'))
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                // Update price and bid count
+                const bidPriceEl = document.getElementById('pdp-bid-price');
+                const bidCountEl = document.getElementById('pdp-bid-count');
+                if (bidPriceEl) {
+                    bidPriceEl.textContent = '₱' + parseFloat(data.currentBid).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                }
+                if (bidCountEl) {
+                    bidCountEl.textContent = data.bidCount + ' bid' + (data.bidCount !== 1 ? 's' : '');
+                }
+
+                // Update bidding inputs if active
+                if (data.status === 'active' && data.timeLeft > 0) {
+                    const bidInput = document.getElementById('pdp-bid-amount');
+                    const bidHint = document.getElementById('pdp-bid-hint');
+                    if (bidInput) {
+                        bidInput.min = data.minBid;
+                        if (parseFloat(bidInput.value || 0) < parseFloat(data.minBid)) {
+                            bidInput.value = data.minBid;
+                        }
+                    }
+                    if (bidHint) {
+                        bidHint.textContent = 'Enter ₱' + parseFloat(data.minBid).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' or more';
+                    }
+                } else {
+                    isAuctionActive = false;
+                    setAuctionEndedUI();
+                    if (pollTimer) clearInterval(pollTimer);
+                }
+            }
+        })
+        .catch(err => console.error('Error polling auction details:', err));
+}
+
+if (isAuctionActive) {
+    setInterval(updatePdpCountdown, 1000);
+    updatePdpCountdown();
+    pollTimer = setInterval(pollPdpAuction, 3000);
+    pollPdpAuction();
+}
+<?php endif; ?>
 </script>

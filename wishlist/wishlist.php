@@ -1,32 +1,47 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     header('Location: ../auth/signin.php?redirect=wishlist/wishlist.php');
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-$userId = $_SESSION['account_id'];
+$uid = $_SESSION['firebase_uid'];
 
+// Fetch wishlist items
+$wishlistItems = getData("wishlists/{$uid}/items");
 $items = [];
-$stmt = $conn->prepare("
-    SELECT w.Wish_ProdID, w.Wish_DateAdd, w.Wish_PriceAdd,
-           p.Prod_Title, p.Prod_Price, p.Prod_Image, p.Prod_Stock, p.Prod_Status, p.Prod_CatID,
-           c.Cat_Name
-    FROM Wishlist w
-    JOIN Product p  ON w.Wish_ProdID = p.Prod_ID
-    LEFT JOIN Category c ON p.Prod_CatID = c.Cat_ID
-    WHERE w.Wish_UserID = ?
-    ORDER BY w.Wish_DateAdd DESC
-");
-$stmt->bind_param("s", $userId);
-$stmt->execute();
-$res = $stmt->get_result();
-while ($row = $res->fetch_assoc()) {
-    $items[] = $row;
+
+if ($wishlistItems) {
+    foreach ($wishlistItems as $prodId => $wishData) {
+        $product = getData("products/{$prodId}");
+        if ($product) {
+            $category = null;
+            if (isset($product['categoryId'])) {
+                $category = getData("categories/{$product['categoryId']}");
+            }
+            
+            $items[] = [
+                'Wish_ProdID' => $prodId,
+                'Wish_DateAdd' => $wishData['dateAdded'] ?? '',
+                'Wish_PriceAdd' => $wishData['priceAdded'] ?? 0,
+                'Prod_Title' => $product['title'] ?? '',
+                'Prod_Price' => $product['price'] ?? 0,
+                'Prod_Image' => $product['image'] ?? '',
+                'Prod_Stock' => $product['stock'] ?? 0,
+                'Prod_Status' => $product['status'] ?? 'active',
+                'Prod_CatID' => $product['categoryId'] ?? '',
+                'Cat_Name' => $category['name'] ?? ''
+            ];
+        }
+    }
 }
-$stmt->close();
+
+// Sort by dateAdded descending
+usort($items, function($a, $b) {
+    return strtotime($b['Wish_DateAdd'] ?? '1970-01-01') - strtotime($a['Wish_DateAdd'] ?? '1970-01-01');
+});
 
 $title    = 'Watchlist';
 $basePath = '../';

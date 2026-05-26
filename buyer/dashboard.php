@@ -1,6 +1,6 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     header('Location: ../auth/signin.php');
     exit;
 }
@@ -8,112 +8,174 @@ if (!empty($_SESSION['is_admin'])) {
     header('Location: ../admin/dashboard.php');
     exit;
 }
-
-
-require_once('../config/db.php');
-
-// Fetch categories
-$categories = [];
-$res = $conn->query("SELECT * FROM Category WHERE Cat_Status='active' LIMIT 12");
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $categories[] = $row;
-    }
+if (!empty($_SESSION['is_seller'])) {
+    header('Location: ../seller/dashboard.php');
+    exit;
 }
 
-// Fetch products
-$latestProducts = [];
-$res2 = $conn->query("SELECT * FROM Product ORDER BY Prod_ID DESC LIMIT 6");
-if ($res2) {
-    while ($row = $res2->fetch_assoc()) {
-        $latestProducts[] = $row;
+
+
+require_once('../config/firebase.php');
+
+// Fetch categories
+$categoriesData = getData('categories');
+$categories = [];
+if ($categoriesData) {
+    foreach ($categoriesData as $catId => $catData) {
+        if (($catData['status'] ?? '') === 'active') {
+            $categories[] = array_merge(['Cat_ID' => $catId], $catData);
+        }
     }
+}
+$categories = array_slice($categories, 0, 12);
+
+// Fetch products
+$productsData = getData('products');
+$latestProducts = [];
+if ($productsData) {
+    $productsArray = [];
+    foreach ($productsData as $prodId => $prodData) {
+        $productsArray[] = [
+            'Prod_ID'    => $prodId,
+            'Prod_Title' => $prodData['title'] ?? '',
+            'Prod_Price' => $prodData['price'] ?? 0,
+            'Prod_Image' => $prodData['image'] ?? '',
+            'dateAdded'  => $prodData['dateAdded'] ?? '1970-01-01'
+        ];
+    }
+    // Sort by dateAdded (descending)
+    usort($productsArray, function($a, $b) {
+        return strtotime($b['dateAdded']) - strtotime($a['dateAdded']);
+    });
+    $latestProducts = array_slice($productsArray, 0, 6);
 }
 
 // Fetch recent orders
 $recentOrders = [];
-$userId = $_SESSION['account_id'];
-$res3 = $conn->prepare("SELECT * FROM `Order` WHERE Order_UserID = ? ORDER BY Order_Date DESC LIMIT 3");
-$res3->bind_param("s", $userId);
-$res3->execute();
-$r = $res3->get_result();
-while ($row = $r->fetch_assoc()) {
-    $recentOrders[] = $row;
+$uid = $_SESSION['firebase_uid'];
+$ordersData = getData('orders');
+if ($ordersData) {
+    foreach ($ordersData as $orderId => $orderData) {
+        if (($orderData['userId'] ?? '') === $uid) {
+            $recentOrders[] = [
+                'Order_ID'    => $orderId,
+                'Order_Date'  => $orderData['date'] ?? date('Y-m-d'),
+                'Order_Total' => $orderData['total'] ?? 0,
+                'status'      => $orderData['status'] ?? 'Pending'
+            ];
+        }
+    }
 }
-$res3->close();
+// Sort by date (descending)
+usort($recentOrders, function($a, $b) {
+    return strtotime($b['Order_Date']) - strtotime($a['Order_Date']);
+});
+$recentOrders = array_slice($recentOrders, 0, 3);
 
 // Fetch dashboard stats
 $activeOrders = 0;
 $completedOrders = 0;
-$stmt4 = $conn->prepare("
-    SELECT s.Ship_Status
-    FROM `Order` o
-    LEFT JOIN Shipment s ON o.Order_ID = s.Ship_OrderID
-    WHERE o.Order_UserID = ?
-");
-$stmt4->bind_param("s", $userId);
-$stmt4->execute();
-$res4 = $stmt4->get_result();
-while ($row = $res4->fetch_assoc()) {
-    if (strtolower($row['Ship_Status'] ?? '') === 'delivered') {
-        $completedOrders++;
-    } else {
-        $activeOrders++;
+if ($ordersData) {
+    foreach ($ordersData as $orderId => $orderData) {
+        if (($orderData['userId'] ?? '') === $uid) {
+            $status = $orderData['status'] ?? '';
+            if ($status === 'Processing' || $status === 'Shipped') {
+                $activeOrders++;
+            } elseif ($status === 'Delivered') {
+                $completedOrders++;
+            }
+        }
     }
 }
-$stmt4->close();
 
-$stmt5 = $conn->prepare("SELECT COUNT(*) as c FROM Wishlist WHERE Wish_UserID = ?");
-$stmt5->bind_param("s", $userId);
-$stmt5->execute();
-$wishlistItems = $stmt5->get_result()->fetch_assoc()['c'] ?? 0;
-$stmt5->close();
+// Fetch wishlist items count
+$wishlistData = getData("wishlists/{$uid}/items");
+$wishlistItems = $wishlistData ? count($wishlistData) : 0;
 
-$stmt6 = $conn->prepare("SELECT COUNT(*) as c FROM Feedback WHERE Feed_UserID = ?");
-$stmt6->bind_param("s", $userId);
-$stmt6->execute();
-$feedbackScore = $stmt6->get_result()->fetch_assoc()['c'] ?? 0;
-$stmt6->close();
+// Fetch feedback score (dynamic count from database)
+$feedbackScore = 0;
+$allFeedbacks = getData('feedbacks') ?: [];
+foreach ($allFeedbacks as $fId => $fData) {
+    if (($fData['userId'] ?? '') === $uid) {
+        $feedbackScore++;
+    }
+}
 
 // Fetch active auctions the buyer is bidding on
 $activeBids = [];
-$stmtBids = $conn->prepare("
-    SELECT w.Wish_PriceAdd as My_Bid,
-           p.Prod_ID, p.Prod_Title, p.Prod_Image,
-           a.Auc_HighBid, a.Auc_StartPrice, a.Auc_EndDate, a.Auc_Status
-    FROM Wishlist w
-    JOIN Product p ON w.Wish_ProdID = p.Prod_ID
-    JOIN Auction a ON a.Auc_ProdID = p.Prod_ID
-    WHERE w.Wish_UserID = ? AND w.Wish_PriceAdd > 0 AND a.Auc_Status = 'Active'
-    ORDER BY a.Auc_EndDate ASC
-");
-$stmtBids->bind_param("s", $userId);
-$stmtBids->execute();
-$resBids = $stmtBids->get_result();
-while ($row = $resBids->fetch_assoc()) {
-    $activeBids[] = $row;
+$auctionsData = getData('auctions');
+if ($auctionsData) {
+    foreach ($auctionsData as $auctionId => $auctionData) {
+        if (($auctionData['status'] ?? '') === 'active') {
+            $productId = $auctionData['productId'] ?? '';
+            // Auto-close if past end date
+            if (strtotime($auctionData['endDate'] ?? '') < time()) {
+                updateData("auctions/{$auctionId}/status", 'ended');
+                updateData("products/{$productId}/auctionData/status", 'ended');
+                $auctionData['status'] = 'ended';
+                $auctionsData[$auctionId]['status'] = 'ended';
+            }
+        }
+        if (($auctionData['status'] ?? '') === 'active') {
+            $productId = $auctionData['productId'] ?? '';
+            $bidsData = getData("auctions/{$auctionId}/bids");
+            if ($bidsData) {
+                foreach ($bidsData as $bidId => $bidData) {
+                    if ($bidData['userId'] === $uid) {
+                        $product = getData("products/{$productId}");
+                        if ($product) {
+                            $activeBids[] = [
+                                'My_Bid' => $bidData['amount'],
+                                'Prod_ID' => $productId,
+                                'Prod_Title' => $product['title'] ?? '',
+                                'Prod_Image' => $product['image'] ?? '',
+                                'Auc_HighBid' => $auctionData['currentHighBid'] ?? 0,
+                                'Auc_StartPrice' => $auctionData['startPrice'] ?? 0,
+                                'Auc_EndDate' => $auctionData['endDate'] ?? '',
+                                'Auc_Status' => $auctionData['status'] ?? '',
+                                'Auc_ID' => $auctionId
+                            ];
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
-$stmtBids->close();
 
 // Fetch won auctions (ended, user is highest bidder, not yet paid)
 $wonAuctions = [];
-$stmtWon = $conn->prepare("
-    SELECT a.Auc_ID, a.Auc_HighBid, a.Auc_EndDate,
-           p.Prod_ID, p.Prod_Title, p.Prod_Image,
-           MAX(b.Bid_Amount) as My_Winning_Bid
-    FROM Bid b
-    JOIN Auction a ON b.Bid_AucID = a.Auc_ID
-    JOIN Product p ON a.Auc_ProdID = p.Prod_ID
-    WHERE b.Bid_UserID = ?
-      AND a.Auc_Status = 'Ended'
-      AND b.Bid_Amount >= a.Auc_HighBid
-    GROUP BY a.Auc_ID
-");
-$stmtWon->bind_param("s", $userId);
-$stmtWon->execute();
-$resWon = $stmtWon->get_result();
-while ($row = $resWon->fetch_assoc()) { $wonAuctions[] = $row; }
-$stmtWon->close();
+if ($auctionsData) {
+    foreach ($auctionsData as $auctionId => $auctionData) {
+        if (($auctionData['status'] ?? '') === 'ended') {
+            $productId = $auctionData['productId'] ?? '';
+            $bidsData = getData("auctions/{$auctionId}/bids");
+            if ($bidsData) {
+                $myTopBid = 0;
+                foreach ($bidsData as $bidData) {
+                    if ($bidData['userId'] === $uid && $bidData['amount'] > $myTopBid) {
+                        $myTopBid = $bidData['amount'];
+                    }
+                }
+                if ($myTopBid >= ($auctionData['currentHighBid'] ?? 0)) {
+                    $product = getData("products/{$productId}");
+                    if ($product) {
+                        $wonAuctions[] = [
+                            'Auc_ID' => $auctionId,
+                            'Auc_HighBid' => $auctionData['currentHighBid'] ?? 0,
+                            'Auc_EndDate' => $auctionData['endDate'] ?? '',
+                            'Prod_ID' => $productId,
+                            'Prod_Title' => $product['title'] ?? '',
+                            'Prod_Image' => $product['image'] ?? '',
+                            'My_Winning_Bid' => $myTopBid
+                        ];
+                    }
+                }
+            }
+        }
+    }
+}
 
 $title    = 'Dashboard';
 $basePath = '../';
@@ -197,7 +259,13 @@ include('../layout/layout.php');
                     <div style="font-weight:700;margin-bottom:4px;">Order #<?= htmlspecialchars($ord['Order_ID']) ?></div>
                     <div style="font-size:14px;color:var(--muted);">Placed on <?= date('M j, Y', strtotime($ord['Order_Date'])) ?> • Total: ₱<?= number_format($ord['Order_Total'], 2) ?></div>
                 </div>
-                <a href="../shipment/shipment.php?order_id=<?= urlencode($ord['Order_ID']) ?>" style="background:var(--blue);color:#fff;padding:8px 24px;border-radius:24px;text-decoration:none;font-weight:600;font-size:14px;">Track Package</a>
+                <?php if ($ord['status'] === 'Pending'): ?>
+                    <a href="../buyer/orders.php" style="background:#f7f7f7;color:var(--muted);border:1px solid var(--border);padding:8px 20px;border-radius:24px;text-decoration:none;font-weight:600;font-size:13px;display:inline-flex;align-items:center;gap:6px;"><i class="bi bi-hourglass-split"></i> Awaiting Acceptance</a>
+                <?php elseif ($ord['status'] === 'Rejected'): ?>
+                    <span style="background:#ffebe8;color:#e53238;border:1px solid #ffcdd2;padding:6px 16px;border-radius:24px;font-weight:600;font-size:13px;display:inline-flex;align-items:center;gap:6px;"><i class="bi bi-x-circle-fill"></i> Rejected</span>
+                <?php else: ?>
+                    <a href="../shipment/shipment.php?order_id=<?= urlencode($ord['Order_ID']) ?>" style="background:var(--blue);color:#fff;padding:8px 24px;border-radius:24px;text-decoration:none;font-weight:600;font-size:14px;">Track Package</a>
+                <?php endif; ?>
             </div>
         <?php endforeach; ?>
     </div>

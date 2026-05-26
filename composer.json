@@ -1,0 +1,12 @@
+{
+    "name": "admin/ebay",
+    "authors": [
+        {
+            "name": "KythCarael",
+            "email": "kythcarael04@gmail.com"
+        }
+    ],
+    "require": {
+        "kreait/firebase-php": "^5.26"
+    }
+}

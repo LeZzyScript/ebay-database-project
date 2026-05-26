@@ -1,60 +1,91 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     header('Location: ../auth/signin.php?redirect=auction/auction.php?id=' . urlencode($_GET['id'] ?? ''));
     exit;
 }
-require_once('../config/db.php');
-$userId = $_SESSION['account_id'];
+require_once('../config/firebase.php');
+$uid = $_SESSION['firebase_uid'];
 $aucId  = trim($_GET['id'] ?? '');
 
 if (!$aucId) { header('Location: ../index.php'); exit; }
 
-// Fetch auction + product info
-$stmt = $conn->prepare("
-    SELECT a.*, p.Prod_Title, p.Prod_Desc, p.Prod_Image, p.Prod_ID,
-           c.Cat_Name, c.Cat_ID,
-           u.User_AccName, u.User_FName, u.User_LName
-    FROM Auction a
-    JOIN Product p ON a.Auc_ProdID = p.Prod_ID
-    LEFT JOIN Category c ON p.Prod_CatID = c.Cat_ID
-    LEFT JOIN Seller s ON p.Prod_SellID = s.Sell_ID
-    LEFT JOIN User u ON s.Sell_UserID = u.User_ID
-    WHERE a.Auc_ID = ?
-");
-$stmt->bind_param("s", $aucId);
-$stmt->execute();
-$auc = $stmt->get_result()->fetch_assoc();
-$stmt->close();
+// Fetch auction data from Firebase
+$auction = getData("auctions/{$aucId}");
 
-if (!$auc) { $_SESSION['flash'] = "Auction not found."; header('Location: ../index.php'); exit; }
+if (!$auction) { $_SESSION['flash'] = "Auction not found."; header('Location: ../index.php'); exit; }
 
 // Auto-close if past end date
-if ($auc['Auc_Status'] === 'Active' && strtotime($auc['Auc_EndDate']) < time()) {
-    $conn->query("UPDATE Auction SET Auc_Status='Ended' WHERE Auc_ID='" . $conn->real_escape_string($aucId) . "'");
-    $auc['Auc_Status'] = 'Ended';
+if (($auction['status'] ?? '') === 'active' && strtotime($auction['endDate'] ?? '') < time()) {
+    updateData("auctions/{$aucId}/status", 'ended');
+    $auction['status'] = 'ended';
+}
+
+// Fetch product data
+$productId = $auction['productId'] ?? '';
+$product = getData("products/{$productId}");
+
+if (!$product) { $_SESSION['flash'] = "Product not found."; header('Location: ../index.php'); exit; }
+
+$isOwner = false;
+if (isset($product['sellerId'])) {
+    if ($uid === $product['sellerId']) {
+        $isOwner = true;
+    } else {
+        $currentUser = getData("users/{$uid}");
+        $currentSellerId = $currentUser['sellerData']['sellerId'] ?? '';
+        if ($currentSellerId && $currentSellerId === $product['sellerId']) {
+            $isOwner = true;
+        }
+    }
+}
+
+// Fetch category data
+$category = null;
+if (isset($product['categoryId'])) {
+    $category = getData("categories/{$product['categoryId']}");
+}
+
+// Fetch seller data
+$sellerUser = null;
+if (isset($product['sellerId'])) {
+    $allUsers = getData('users');
+    if ($allUsers) {
+        foreach ($allUsers as $userId => $userData) {
+            if (isset($userData['sellerData']['sellerId']) && $userData['sellerData']['sellerId'] === $product['sellerId']) {
+                $sellerUser = $userData['profile'];
+                break;
+            }
+        }
+    }
 }
 
 // Fetch all bids for this auction
+$bidsData = getData("auctions/{$aucId}/bids");
 $bids = [];
-$stmtB = $conn->prepare("
-    SELECT b.Bid_Amount, b.Bid_Date, b.Bid_UserID,
-           u.User_AccName
-    FROM Bid b
-    JOIN User u ON b.Bid_UserID = u.User_ID
-    WHERE b.Bid_AucID = ?
-    ORDER BY b.Bid_Amount DESC
-");
-$stmtB->bind_param("s", $aucId);
-$stmtB->execute();
-$resB = $stmtB->get_result();
-while ($r = $resB->fetch_assoc()) { $bids[] = $r; }
-$stmtB->close();
+if ($bidsData) {
+    foreach ($bidsData as $bidId => $bidData) {
+        $bidUser = getData("users/{$bidData['userId']}");
+        if ($bidUser) {
+            $bids[] = [
+                'Bid_Amount' => $bidData['amount'],
+                'Bid_Date' => $bidData['date'],
+                'Bid_UserID' => $bidData['userId'],
+                'User_AccName' => $bidUser['profile']['accountName'] ?? ''
+            ];
+        }
+    }
+}
+
+// Sort bids by amount descending
+usort($bids, function($a, $b) {
+    return $b['Bid_Amount'] - $a['Bid_Amount'];
+});
 
 $bidCount   = count($bids);
-$currentBid = $auc['Auc_HighBid'] > 0 ? floatval($auc['Auc_HighBid']) : floatval($auc['Auc_StartPrice']);
+$currentBid = ($auction['currentHighBid'] ?? 0) > 0 ? floatval($auction['currentHighBid']) : floatval($auction['startPrice'] ?? 0);
 $minBid     = $bidCount > 0 ? $currentBid + 10 : $currentBid;
-$timeLeft   = strtotime($auc['Auc_EndDate']) - time();
+$timeLeft   = strtotime($auction['endDate'] ?? '') - time();
 $days  = floor($timeLeft / 86400);
 $hours = floor(($timeLeft % 86400) / 3600);
 $mins  = floor(($timeLeft % 3600) / 60);
@@ -63,15 +94,15 @@ $timeStr = $timeLeft < 0 ? 'Ended' : ($days > 0 ? "{$days}d {$hours}h left" : "{
 // Is current user the winner?
 $myTopBid = 0;
 foreach ($bids as $b) {
-    if ($b['Bid_UserID'] === $userId && $b['Bid_Amount'] > $myTopBid) {
+    if ($b['Bid_UserID'] === $uid && $b['Bid_Amount'] > $myTopBid) {
         $myTopBid = floatval($b['Bid_Amount']);
     }
 }
-$isWinner = $auc['Auc_Status'] === 'Ended' && $myTopBid >= $currentBid && $bidCount > 0;
-$isActive = $auc['Auc_Status'] === 'Active' && $timeLeft > 0;
+$isWinner = ($auction['status'] ?? '') === 'ended' && $myTopBid >= $currentBid && $bidCount > 0;
+$isActive = ($auction['status'] ?? '') === 'active' && $timeLeft > 0;
 
-$sellerName = $auc['User_AccName'] ?? trim($auc['User_FName'] . ' ' . $auc['User_LName']);
-$title    = 'Auction — ' . htmlspecialchars($auc['Prod_Title']);
+$sellerName = $sellerUser['accountName'] ?? trim(($sellerUser['firstName'] ?? '') . ' ' . ($sellerUser['lastName'] ?? ''));
+$title    = 'Auction — ' . htmlspecialchars($product['title'] ?? '');
 $basePath = '../';
 include('../layout/layout.php');
 ?>
@@ -128,7 +159,7 @@ include('../layout/layout.php');
     <!-- Breadcrumb -->
     <div style="font-size:12px;color:var(--muted);margin-bottom:20px;">
         <a href="../index.php" style="color:var(--muted);text-decoration:none;">eBay</a> &rsaquo;
-        <a href="../product/product.php?id=<?= urlencode($auc['Prod_ID']) ?>" style="color:var(--muted);text-decoration:none;"><?= htmlspecialchars($auc['Prod_Title']) ?></a> &rsaquo;
+        <a href="../product/product.php?id=<?= urlencode($productId) ?>" style="color:var(--muted);text-decoration:none;"><?= htmlspecialchars($product['title'] ?? '') ?></a> &rsaquo;
         <span>Auction</span>
     </div>
 
@@ -136,8 +167,8 @@ include('../layout/layout.php');
         <!-- Image -->
         <div class="auc-img-col">
             <div class="auc-img-main">
-                <?php if (!empty($auc['Prod_Image'])): ?>
-                    <img src="<?= htmlspecialchars($auc['Prod_Image']) ?>" alt="<?= htmlspecialchars($auc['Prod_Title']) ?>">
+                <?php if (!empty($product['image'])): ?>
+                    <img src="<?= htmlspecialchars($product['image']) ?>" alt="<?= htmlspecialchars($product['title'] ?? '') ?>">
                 <?php else: ?>
                     <i class="bi bi-box" style="font-size:6rem;color:var(--muted);"></i>
                 <?php endif; ?>
@@ -152,80 +183,91 @@ include('../layout/layout.php');
         <!-- Info -->
         <div class="auc-info-col">
             <?php
-            $badgeClass = match($auc['Auc_Status']) {
-                'Active' => 'badge-active',
-                'Paid'   => 'badge-paid',
+            $badgeClass = match($auction['status'] ?? '') {
+                'active' => 'badge-active',
+                'paid'   => 'badge-paid',
                 default  => 'badge-ended',
             };
-            $badgeText = match($auc['Auc_Status']) {
-                'Active' => '<i class="bi bi-broadcast"></i> Live Auction',
-                'Paid'   => '<i class="bi bi-check-circle-fill"></i> Paid',
+            $badgeText = match($auction['status'] ?? '') {
+                'active' => '<i class="bi bi-broadcast"></i> Live Auction',
+                'paid'   => '<i class="bi bi-check-circle-fill"></i> Paid',
                 default  => '<i class="bi bi-stop-circle"></i> Auction Ended',
             };
             ?>
-            <div class="auc-badge <?= $badgeClass ?>"><?= $badgeText ?></div>
-            <h1 class="auc-title"><?= htmlspecialchars($auc['Prod_Title']) ?></h1>
+            <div class="auc-badge <?= $badgeClass ?>" id="auc-badge-status"><?= $badgeText ?></div>
+            <h1 class="auc-title"><?= htmlspecialchars($product['title'] ?? '') ?></h1>
 
             <!-- Winner box -->
-            <?php if ($isWinner): ?>
-            <div class="auc-winner-box">
-                <div style="font-weight:700;font-size:16px;margin-bottom:6px;"><i class="bi bi-trophy-fill" style="color:#f5af02;"></i> You won this auction!</div>
-                <div style="font-size:13px;color:var(--muted);margin-bottom:12px;">Your winning bid: <strong>₱<?= number_format($myTopBid, 2) ?></strong>. Complete your purchase to secure this item.</div>
-                <a href="../checkout/checkout.php?auction_id=<?= urlencode($aucId) ?>" class="auc-pay-btn">
-                    <i class="bi bi-bag-check"></i> Pay Now — ₱<?= number_format($myTopBid, 2) ?>
-                </a>
+            <div id="auc-winner-section">
+                <?php if ($isWinner): ?>
+                <div class="auc-winner-box">
+                    <div style="font-weight:700;font-size:16px;margin-bottom:6px;"><i class="bi bi-trophy-fill" style="color:#f5af02;"></i> You won this auction!</div>
+                    <div style="font-size:13px;color:var(--muted);margin-bottom:12px;">Your winning bid: <strong>₱<?= number_format($myTopBid, 2) ?></strong>. Complete your purchase to secure this item.</div>
+                    <a href="../checkout/checkout.php?auction_id=<?= urlencode($aucId) ?>" class="auc-pay-btn">
+                        <i class="bi bi-bag-check"></i> Pay Now — ₱<?= number_format($myTopBid, 2) ?>
+                    </a>
+                </div>
+                <?php elseif (($auction['status'] ?? '') === 'paid'): ?>
+                <div style="background:#e3f2fd;border:1px solid #90caf9;border-radius:12px;padding:16px;margin-bottom:16px;font-size:14px;color:#1565c0;font-weight:600;">
+                    <i class="bi bi-bag-check-fill"></i> This auction has been purchased by the winner.
+                </div>
+                <?php elseif (($auction['status'] ?? '') === 'ended' && !$isWinner && $bidCount > 0): ?>
+                <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:12px;padding:16px;margin-bottom:16px;font-size:14px;color:#856404;">
+                    <i class="bi bi-exclamation-circle-fill"></i> This auction has ended. Another bidder won.
+                </div>
+                <?php endif; ?>
             </div>
-            <?php elseif ($auc['Auc_Status'] === 'Paid'): ?>
-            <div style="background:#e3f2fd;border:1px solid #90caf9;border-radius:12px;padding:16px;margin-bottom:16px;font-size:14px;color:#1565c0;font-weight:600;">
-                <i class="bi bi-bag-check-fill"></i> This auction has been purchased by the winner.
-            </div>
-            <?php elseif ($auc['Auc_Status'] === 'Ended' && !$isWinner && $bidCount > 0): ?>
-            <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:12px;padding:16px;margin-bottom:16px;font-size:14px;color:#856404;">
-                <i class="bi bi-exclamation-circle-fill"></i> This auction has ended. Another bidder won.
-            </div>
-            <?php endif; ?>
 
             <!-- Bid panel -->
             <div class="auc-panel">
                 <div class="auc-panel-row">
-                    <span class="auc-sub"><?= $bidCount > 0 ? 'Current bid' : 'Starting bid' ?></span>
-                    <span class="auc-sub"><?= $bidCount ?> bid<?= $bidCount != 1 ? 's' : '' ?></span>
+                    <span class="auc-sub" id="auc-bid-label"><?= $bidCount > 0 ? 'Current bid' : 'Starting bid' ?></span>
+                    <span class="auc-sub" id="auc-bid-count"><?= $bidCount ?> bid<?= $bidCount != 1 ? 's' : '' ?></span>
                 </div>
-                <div class="auc-price">₱<?= number_format($currentBid, 2) ?></div>
+                <div class="auc-price" id="auc-price">₱<?= number_format($currentBid, 2) ?></div>
 
-                <?php if ($auc['Auc_Status'] === 'Active'): ?>
-                <div class="auc-timer">
-                    <i class="bi bi-clock-history"></i>
-                    <span id="countdown"><?= htmlspecialchars($timeStr) ?></span>
-                    <span style="color:var(--muted);">&bull; Ends <?= date('M j, Y g:i A', strtotime($auc['Auc_EndDate'])) ?></span>
+                <div id="auc-action-area">
+                    <?php if (($auction['status'] ?? '') === 'active'): ?>
+                    <div class="auc-timer">
+                        <i class="bi bi-clock-history"></i>
+                        <span id="countdown"><?= htmlspecialchars($timeStr) ?></span>
+                        <span style="color:var(--muted);" id="auc-end-time-string">&bull; Ends <?= date('M j, Y g:i A', strtotime($auction['endDate'] ?? '')) ?></span>
+                    </div>
+                    <?php if ($isActive): ?>
+                    <form method="POST" action="../auction/place_bid.php" class="auc-bid-form" id="auc-bid-form">
+                        <input type="hidden" name="prod_id" value="<?= htmlspecialchars($productId) ?>">
+                        <input type="number" name="bid_amount" id="auc-bid-input" class="auc-bid-input"
+                               min="<?= $minBid ?>" step="0.01" value="<?= $minBid ?>" placeholder="Your bid">
+                        <button type="submit" class="auc-bid-btn" id="auc-place-bid-btn"><i class="bi bi-arrow-up-circle"></i> Place Bid</button>
+                    </form>
+                    <div style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center;" id="auc-bid-hint">Enter ₱<?= number_format($minBid, 2) ?> or more</div>
+                    <?php endif; ?>
+                    <?php else: ?>
+                    <div class="auc-timer"><i class="bi bi-stop-circle"></i> <span id="auc-timer-ended-text">Auction ended <?= date('M j, Y g:i A', strtotime($auction['endDate'] ?? '')) ?></span></div>
+                    <?php endif; ?>
+
+                    <?php if ($isOwner && ($auction['status'] ?? '') === 'active'): ?>
+                    <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);">
+                        <form action="../auction/stop_auction.php" method="POST" style="margin:0;" onsubmit="return confirm('Are you sure you want to manually stop this auction?');">
+                            <input type="hidden" name="auction_id" value="<?= htmlspecialchars($aucId) ?>">
+                            <input type="hidden" name="redirect" value="../auction/auction.php?id=<?= urlencode($aucId) ?>">
+                            <button type="submit" style="width:100%; padding:12px; background:#fff8e1; border:1px solid #ffeeba; color:#856404; border-radius:24px; font-size:15px; font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:8px; transition:background 0.2s; font-family:var(--font);" onmouseover="this.style.background='#ffe082'" onmouseout="this.style.background='#fff8e1'"><i class="bi bi-stop-circle-fill" style="color:#b78103;"></i> Stop Auction Manually</button>
+                        </form>
+                    </div>
+                    <?php endif; ?>
                 </div>
-                <?php if ($isActive): ?>
-                <form method="POST" action="../auction/place_bid.php" class="auc-bid-form">
-                    <input type="hidden" name="prod_id" value="<?= htmlspecialchars($auc['Prod_ID']) ?>">
-                    <input type="number" name="bid_amount" class="auc-bid-input"
-                           min="<?= $minBid ?>" step="0.01" value="<?= $minBid ?>" placeholder="Your bid">
-                    <button type="submit" class="auc-bid-btn"><i class="bi bi-arrow-up-circle"></i> Place Bid</button>
-                </form>
-                <div style="font-size:12px;color:var(--muted);margin-top:8px;text-align:center;">Enter ₱<?= number_format($minBid, 2) ?> or more</div>
-                <?php endif; ?>
-                <?php else: ?>
-                <div class="auc-timer"><i class="bi bi-stop-circle"></i> <span>Auction ended <?= date('M j, Y g:i A', strtotime($auc['Auc_EndDate'])) ?></span></div>
-                <?php endif; ?>
             </div>
 
-            <?php if ($myTopBid > 0 && $isActive): ?>
-            <div style="font-size:13px;color:var(--muted);padding:8px 0;">
-                Your current bid: <strong>₱<?= number_format($myTopBid, 2) ?></strong>
-                <?= $myTopBid >= $currentBid ? '<span style="color:#2e7d32;font-weight:600;"> — You are the highest bidder 🏆</span>' : '<span style="color:#e53238;"> — You have been outbid</span>' ?>
+            <div id="auc-my-bid-status" style="font-size:13px;color:var(--muted);padding:8px 0; <?= ($myTopBid > 0 && $isActive) ? '' : 'display:none;' ?>">
+                Your current bid: <strong>₱<span id="auc-my-bid-amount"><?= number_format($myTopBid, 2) ?></span></strong>
+                <span id="auc-my-bid-comparison"><?= $myTopBid >= $currentBid ? '<span style="color:#2e7d32;font-weight:600;"> — You are the highest bidder 🏆</span>' : '<span style="color:#e53238;"> — You have been outbid</span>' ?></span>
             </div>
-            <?php endif; ?>
         </div>
     </div>
 
     <!-- Bid History -->
-    <?php if (!empty($bids)): ?>
-    <div class="bids-section">
-        <h2 style="font-size:20px;font-weight:700;margin-bottom:16px;">Bid History (<?= $bidCount ?>)</h2>
+    <div class="bids-section" id="auc-bids-history-section" style="<?= !empty($bids) ? '' : 'display:none;' ?>">
+        <h2 style="font-size:20px;font-weight:700;margin-bottom:16px;" id="auc-bids-history-title">Bid History (<?= $bidCount ?>)</h2>
         <div style="background:#fff;border:1px solid var(--border);border-radius:12px;overflow:hidden;">
             <table class="bids-table">
                 <thead>
@@ -236,14 +278,14 @@ include('../layout/layout.php');
                         <th>Date</th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="auc-bids-tbody">
                     <?php foreach ($bids as $i => $b): ?>
                     <tr <?= $i === 0 ? 'class="bid-winner-row"' : '' ?>>
                         <td><?= $i === 0 ? '<i class="bi bi-trophy-fill" style="color:#f5af02;"></i>' : ($i + 1) ?></td>
                         <td>
                             <?= $i === 0 ? '<i class="bi bi-person-check-fill" style="color:#2e7d32;"></i> ' : '' ?>
                             <?= htmlspecialchars($b['User_AccName']) ?>
-                            <?= $b['Bid_UserID'] === $userId ? ' <span style="background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">You</span>' : '' ?>
+                            <?= $b['Bid_UserID'] === $uid ? ' <span style="background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">You</span>' : '' ?>
                         </td>
                         <td><strong>₱<?= number_format($b['Bid_Amount'], 2) ?></strong></td>
                         <td style="color:var(--muted);"><?= date('M j, Y g:i A', strtotime($b['Bid_Date'])) ?></td>
@@ -253,17 +295,39 @@ include('../layout/layout.php');
             </table>
         </div>
     </div>
-    <?php endif; ?>
 </div>
 
 <?php include('../layout/footer.php'); ?>
 <script>
+const currentUserId = '<?= $uid ?>';
+const productId = '<?= $productId ?>';
+const aucId = '<?= $aucId ?>';
+
 // Live countdown
-<?php if ($isActive && $timeLeft > 0): ?>
-let endTs = <?= strtotime($auc['Auc_EndDate']) * 1000 ?>;
+let endTs = <?= strtotime($auction['endDate'] ?? '') * 1000 ?>;
+let isAuctionActive = <?= ($auction['status'] ?? '') === 'active' && $timeLeft > 0 ? 'true' : 'false' ?>;
+let pollTimer = null;
+
 function updateCountdown() {
+    if (!isAuctionActive) return;
     let rem = Math.floor((endTs - Date.now()) / 1000);
-    if (rem <= 0) { document.getElementById('countdown').textContent = 'Ended'; return; }
+    if (rem <= 0) {
+        isAuctionActive = false;
+        document.getElementById('countdown').textContent = 'Ended';
+        fetch('../auction/get_bid.php?prod_id=' + encodeURIComponent(productId))
+            .then(r => r.json())
+            .then(data => {
+                let winnerId = null;
+                let winningAmt = 0;
+                if (data.bids && data.bids.length > 0) {
+                    winnerId = data.bids[0].userId;
+                    winningAmt = data.bids[0].amount;
+                }
+                setAuctionEndedUI(data.bidCount > 0, winnerId, winningAmt);
+            });
+        if (pollTimer) clearInterval(pollTimer);
+        return;
+    }
     let d = Math.floor(rem / 86400);
     let h = Math.floor((rem % 86400) / 3600);
     let m = Math.floor((rem % 3600) / 60);
@@ -272,7 +336,185 @@ function updateCountdown() {
         ? `${d}d ${h}h ${m}m left`
         : `${h}h ${m}m ${s}s left`;
 }
-setInterval(updateCountdown, 1000);
-updateCountdown();
-<?php endif; ?>
+
+function setAuctionEndedUI(hasBids, winnerId, winningAmount) {
+    const countdownEl = document.getElementById('countdown');
+    if (countdownEl) countdownEl.textContent = 'Ended';
+    
+    const actionArea = document.getElementById('auc-action-area');
+    if (actionArea) {
+        actionArea.innerHTML = '<div class="auc-timer"><i class="bi bi-stop-circle"></i> <span>Auction ended</span></div>';
+    }
+
+    const myBidStatusEl = document.getElementById('auc-my-bid-status');
+    if (myBidStatusEl) myBidStatusEl.style.display = 'none';
+
+    const badgeEl = document.getElementById('auc-badge-status');
+    if (badgeEl && !badgeEl.classList.contains('badge-paid')) {
+        badgeEl.className = 'auc-badge badge-ended';
+        badgeEl.innerHTML = '<i class="bi bi-stop-circle"></i> Auction Ended';
+    }
+
+    const winnerSec = document.getElementById('auc-winner-section');
+    if (winnerSec) {
+        if (hasBids && winnerId) {
+            if (winnerId === currentUserId) {
+                winnerSec.innerHTML = `
+                    <div class="auc-winner-box">
+                        <div style="font-weight:700;font-size:16px;margin-bottom:6px;"><i class="bi bi-trophy-fill" style="color:#f5af02;"></i> You won this auction!</div>
+                        <div style="font-size:13px;color:var(--muted);margin-bottom:12px;">Your winning bid: <strong>₱${parseFloat(winningAmount).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</strong>. Complete your purchase to secure this item.</div>
+                        <a href="../checkout/checkout.php?auction_id=${encodeURIComponent(aucId)}" class="auc-pay-btn">
+                            <i class="bi bi-bag-check"></i> Pay Now — ₱${parseFloat(winningAmount).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}
+                        </a>
+                    </div>
+                `;
+            } else {
+                winnerSec.innerHTML = `
+                    <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:12px;padding:16px;margin-bottom:16px;font-size:14px;color:#856404;">
+                        <i class="bi bi-exclamation-circle-fill"></i> This auction has ended. Another bidder won.
+                    </div>
+                `;
+            }
+        } else {
+            winnerSec.innerHTML = '';
+        }
+    }
+}
+
+function pollAuctionDetails() {
+    if (!isAuctionActive) return;
+    fetch('../auction/get_bid.php?prod_id=' + encodeURIComponent(productId))
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                const priceEl = document.getElementById('auc-price');
+                const bidCountEl = document.getElementById('auc-bid-count');
+                const bidLabelEl = document.getElementById('auc-bid-label');
+                
+                if (priceEl) {
+                    priceEl.textContent = '₱' + parseFloat(data.currentBid).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                }
+                if (bidCountEl) {
+                    bidCountEl.textContent = data.bidCount + ' bid' + (data.bidCount !== 1 ? 's' : '');
+                }
+                if (bidLabelEl) {
+                    bidLabelEl.textContent = data.bidCount > 0 ? 'Current bid' : 'Starting bid';
+                }
+
+                if (data.status !== 'active' || data.timeLeft <= 0) {
+                    isAuctionActive = false;
+                    let winnerId = null;
+                    let winningAmt = 0;
+                    if (data.bids && data.bids.length > 0) {
+                        winnerId = data.bids[0].userId;
+                        winningAmt = data.bids[0].amount;
+                    }
+                    setAuctionEndedUI(data.bidCount > 0, winnerId, winningAmt);
+                    if (pollTimer) clearInterval(pollTimer);
+                } else {
+                    const bidInput = document.getElementById('auc-bid-input');
+                    const bidHint = document.getElementById('auc-bid-hint');
+                    if (bidInput) {
+                        bidInput.min = data.minBid;
+                        if (parseFloat(bidInput.value || 0) < parseFloat(data.minBid)) {
+                            bidInput.value = data.minBid;
+                        }
+                    }
+                    if (bidHint) {
+                        bidHint.textContent = 'Enter ₱' + parseFloat(data.minBid).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' or more';
+                    }
+
+                    let myTopBid = 0;
+                    data.bids.forEach(b => {
+                        if (b.userId === currentUserId && b.amount > myTopBid) {
+                            myTopBid = b.amount;
+                        }
+                    });
+                    const myBidStatusEl = document.getElementById('auc-my-bid-status');
+                    if (myBidStatusEl) {
+                        if (myTopBid > 0) {
+                            myBidStatusEl.style.display = 'block';
+                            document.getElementById('auc-my-bid-amount').textContent = parseFloat(myTopBid).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                            const comparisonEl = document.getElementById('auc-my-bid-comparison');
+                            if (myTopBid >= parseFloat(data.currentBid)) {
+                                comparisonEl.innerHTML = '<span style="color:#2e7d32;font-weight:600;"> — You are the highest bidder 🏆</span>';
+                            } else {
+                                comparisonEl.innerHTML = '<span style="color:#e53238;"> — You have been outbid</span>';
+                            }
+                        } else {
+                            myBidStatusEl.style.display = 'none';
+                        }
+                    }
+                }
+
+                const bidsHistorySection = document.getElementById('auc-bids-history-section');
+                const tbody = document.getElementById('auc-bids-tbody');
+                const titleEl = document.getElementById('auc-bids-history-title');
+
+                if (data.bids && data.bids.length > 0) {
+                    if (bidsHistorySection) bidsHistorySection.style.display = 'block';
+                    if (titleEl) titleEl.textContent = 'Bid History (' + data.bidCount + ')';
+                    
+                    if (tbody) {
+                        tbody.innerHTML = '';
+                        data.bids.forEach((b, index) => {
+                            const isWinnerRow = index === 0;
+                            const tr = document.createElement('tr');
+                            if (isWinnerRow) tr.className = 'bid-winner-row';
+
+                            let trophyCol = isWinnerRow ? '<i class="bi bi-trophy-fill" style="color:#f5af02;"></i>' : (index + 1);
+                            let userCheck = isWinnerRow ? '<i class="bi bi-person-check-fill" style="color:#2e7d32;"></i> ' : '';
+                            let youBadge = b.userId === currentUserId ? ' <span style="background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">You</span>' : '';
+
+                            tr.innerHTML = `
+                                <td>${trophyCol}</td>
+                                <td>
+                                    ${userCheck}
+                                    ${escapeHtml(b.userAccName)}
+                                    ${youBadge}
+                                </td>
+                                <td><strong>₱${parseFloat(b.amount).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</strong></td>
+                                <td style="color:var(--muted);">${escapeHtml(b.date)}</td>
+                            `;
+                            tbody.appendChild(tr);
+                        });
+                    }
+                } else {
+                    if (bidsHistorySection) bidsHistorySection.style.display = 'none';
+                }
+            }
+        })
+        .catch(err => console.error('Error polling auction details:', err));
+}
+
+function escapeHtml(text) {
+    if (!text) return '';
+    return text.toString()
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+if (isAuctionActive) {
+    setInterval(updateCountdown, 1000);
+    updateCountdown();
+    pollTimer = setInterval(pollAuctionDetails, 3000);
+    pollAuctionDetails();
+} else {
+    fetch('../auction/get_bid.php?prod_id=' + encodeURIComponent(productId))
+        .then(r => r.json())
+        .then(data => {
+            if (data.success && data.status !== 'active') {
+                let winnerId = null;
+                let winningAmt = 0;
+                if (data.bids && data.bids.length > 0) {
+                    winnerId = data.bids[0].userId;
+                    winningAmt = data.bids[0].amount;
+                }
+                setAuctionEndedUI(data.bidCount > 0, winnerId, winningAmt);
+            }
+        });
+}
 </script>

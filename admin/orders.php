@@ -1,34 +1,96 @@
 <?php
 require_once "includes/auth.php";
 requireAdminLogin();
-require_once "../config/db.php";
+require_once "../config/firebase.php";
 
 $message = '';
 $messageType = '';
 
 // Update order status
 if (isset($_POST['update_status'])) {
-    $orderId = $conn->real_escape_string($_POST['order_id']);
-    $payStat = $conn->real_escape_string($_POST['order_paystat']);
-    $shipStat = $conn->real_escape_string($_POST['ship_status']);
+    $orderId = $_POST['order_id'];
+    $payStat = $_POST['order_paystat'];
+    $shipStat = $_POST['ship_status'] ?? '';
     
-    $conn->query("UPDATE `Order` SET Order_PayStat = '$payStat' WHERE Order_ID = '$orderId'");
-    $conn->query("UPDATE Shipment SET Ship_Status = '$shipStat' WHERE Ship_OrderID = '$orderId'");
+    updateData("orders/{$orderId}/paymentStatus", $payStat);
     
-    $message = "Order and Shipment status updated!";
+    if ($shipStat) {
+        // In Firebase, shipment status is stored in the order
+        updateData("orders/{$orderId}/status", $shipStat);
+    }
+    
+    $message = "Order status updated!";
+    $messageType = "success";
+}
+
+// Delete order permanently
+if (isset($_GET['delete']) && isset($_GET['id'])) {
+    $oid = $_GET['id'];
+    deleteData("orders/{$oid}");
+    $message = "Order deleted successfully from database!";
     $messageType = "success";
 }
 
 // Get orders with user info
 $statusFilter = $_GET['status'] ?? '';
-$where = $statusFilter ? "WHERE o.Order_PayStat = '" . $conn->real_escape_string($statusFilter) . "'" : "";
-$query = "SELECT o.*, u.User_FName, u.User_LName, u.User_Email, s.Ship_Status, s.Ship_ID 
-          FROM `Order` o
-          JOIN User u ON o.Order_UserID = u.User_ID
-          LEFT JOIN Shipment s ON o.Order_ID = s.Ship_OrderID
-          $where
-          ORDER BY o.Order_Date DESC";
-$orders = $conn->query($query);
+$shipFilter  = $_GET['ship_status'] ?? '';
+$orders = [];
+$ordersData = getData('orders');
+
+if ($ordersData) {
+    foreach ($ordersData as $orderId => $orderData) {
+        // Apply payment filter (case-insensitive)
+        if ($statusFilter && strtolower($orderData['paymentStatus'] ?? '') !== strtolower($statusFilter)) {
+            continue;
+        }
+        // Apply ship status filter
+        $rawStatus = $orderData['status'] ?? 'Pending';
+        if ($shipFilter && strtolower($rawStatus) !== strtolower($shipFilter)) {
+            continue;
+        }
+        
+        // Get user info
+        $userId = $orderData['userId'] ?? '';
+        $userData = getData("users/{$userId}");
+        $profile = $userData['profile'] ?? [];
+        
+        // Calculate total from items
+        $orderItems = getData("orders/{$orderId}/items");
+        $total = 0;
+        if ($orderItems) {
+            foreach ($orderItems as $itemData) {
+                $total += ($itemData['subtotal'] ?? 0);
+            }
+        }
+        
+        // Map order status
+        $status = $orderData['status'] ?? 'Pending';
+        $shipStatus = $status;
+        if ($status === 'Shipped') {
+            $shipStatus = 'In Transit';
+        }
+        // Only show shipment info for accepted orders
+        $hasShipment = !in_array($status, ['Pending', 'Rejected']);
+        
+        $orders[] = [
+            'Order_ID'      => $orderId,
+            'User_FName'    => $profile['firstName'] ?? '',
+            'User_LName'    => $profile['lastName'] ?? '',
+            'User_Email'    => $profile['email'] ?? '',
+            'Order_Total'   => $total,
+            'Order_PayStat' => $orderData['paymentStatus'] ?? 'Paid',
+            'Order_Status'  => $status,
+            'Ship_Status'   => $shipStatus,
+            'Ship_ID'       => $hasShipment ? $orderId : null,
+            'Order_Date'    => $orderData['date'] ?? date('Y-m-d')
+        ];
+    }
+}
+
+// Sort by date descending
+usort($orders, function($a, $b) {
+    return strtotime($b['Order_Date']) - strtotime($a['Order_Date']);
+});
 
 $title = "Order Management";
 ?>
@@ -105,6 +167,9 @@ $title = "Order Management";
                 <i class="bi bi-receipt"></i> Orders
             </a>
             <hr class="mx-3 my-3" style="border-color:rgba(255,255,255,0.1)">
+            <a href="../auth/logout.php" class="nav-link-custom d-block">
+                <i class="bi bi-box-arrow-right"></i> Logout
+            </a>
         </div>
     </div>
 
@@ -139,13 +204,27 @@ $title = "Order Management";
                     <label class="form-label small fw-bold">Payment Status</label>
                     <select name="status" class="form-select">
                         <option value="">All Orders</option>
-                        <option value="pending" <?= $statusFilter === 'pending' ? 'selected' : '' ?>>Pending</option>
-                        <option value="paid" <?= $statusFilter === 'paid' ? 'selected' : '' ?>>Paid</option>
-                        <option value="cancelled" <?= $statusFilter === 'cancelled' ? 'selected' : '' ?>>Cancelled</option>
+                        <option value="Paid"      <?= $statusFilter === 'Paid'      ? 'selected' : '' ?>>Paid</option>
+                        <option value="Pending"   <?= $statusFilter === 'Pending'   ? 'selected' : '' ?>>Pending Payment</option>
+                        <option value="Cancelled" <?= $statusFilter === 'Cancelled' ? 'selected' : '' ?>>Cancelled</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small fw-bold">Order Status</label>
+                    <select name="ship_status" class="form-select">
+                        <option value="">All Statuses</option>
+                        <option value="Pending"    <?= $shipFilter === 'Pending'    ? 'selected' : '' ?>>Pending Acceptance</option>
+                        <option value="Processing" <?= $shipFilter === 'Processing' ? 'selected' : '' ?>>Processing</option>
+                        <option value="Shipped"    <?= $shipFilter === 'Shipped'    ? 'selected' : '' ?>>Shipped / In Transit</option>
+                        <option value="Delivered"  <?= $shipFilter === 'Delivered'  ? 'selected' : '' ?>>Delivered</option>
+                        <option value="Rejected"   <?= $shipFilter === 'Rejected'   ? 'selected' : '' ?>>Rejected</option>
                     </select>
                 </div>
                 <div class="col-md-2">
                     <button type="submit" class="btn btn-primary w-100"><i class="bi bi-filter me-1"></i> Filter</button>
+                </div>
+                <div class="col-md-2">
+                    <a href="orders.php" class="btn btn-outline-secondary w-100">Reset</a>
                 </div>
             </form>
         </div>
@@ -155,11 +234,21 @@ $title = "Order Management";
             <div class="table-responsive">
                 <table class="table table-hover align-middle">
                     <thead class="table-light">
-                        <tr><th>Order ID</th><th>Customer</th><th>Total Amount</th><th>Payment</th><th>Shipping</th><th>Order Date</th><th>Actions</th></tr>
+                        <tr><th>Order ID</th><th>Customer</th><th>Total Amount</th><th>Payment</th><th>Order Status</th><th>Shipping</th><th>Order Date</th><th>Actions</th></tr>
                     </thead>
                     <tbody>
-                        <?php if ($orders && $orders->num_rows > 0): ?>
-                            <?php while ($order = $orders->fetch_assoc()): ?>
+                        <?php if (!empty($orders)): ?>
+                            <?php foreach ($orders as $order): ?>
+                                <?php
+                                $orderStatusBadge = match($order['Order_Status'] ?? 'Pending') {
+                                    'Pending'    => ['bg-warning text-dark', 'bi-hourglass-split', 'Pending'],
+                                    'Processing' => ['bg-info text-dark',    'bi-gear-fill',        'Processing'],
+                                    'Shipped'    => ['bg-primary',            'bi-truck',            'Shipped'],
+                                    'Delivered'  => ['bg-success',            'bi-house-check-fill', 'Delivered'],
+                                    'Rejected'   => ['bg-danger',             'bi-x-circle-fill',    'Rejected'],
+                                    default      => ['bg-secondary',          'bi-question',         $order['Order_Status'] ?? ''],
+                                };
+                                ?>
                                 <tr>
                                     <td><code>#<?= $order['Order_ID'] ?></code></td>
                                     <td>
@@ -168,23 +257,32 @@ $title = "Order Management";
                                     </td>
                                     <td><strong>₱<?= number_format($order['Order_Total'] ?? 0, 2) ?></strong></td>
                                     <td>
-                                        <span class="status-badge status-<?= strtolower($order['Order_PayStat'] ?? 'pending') ?>">
-                                            <?= ucfirst($order['Order_PayStat'] ?? 'Pending') ?>
+                                        <span class="status-badge status-<?= strtolower($order['Order_PayStat'] ?? 'paid') ?>">
+                                            <?= ucfirst($order['Order_PayStat'] ?? 'Paid') ?>
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <span class="badge <?= $orderStatusBadge[0] ?>">
+                                            <i class="bi <?= $orderStatusBadge[1] ?> me-1"></i><?= $orderStatusBadge[2] ?>
                                         </span>
                                     </td>
                                     <td>
                                         <?php if ($order['Ship_ID']): ?>
-                                            <span class="badge bg-info text-dark"><?= ucfirst($order['Ship_Status'] ?? 'Processing') ?></span><br>
-                                            <small class="text-muted"><code><?= $order['Ship_ID'] ?></code></small>
+                                            <span class="badge bg-info text-dark"><?= ucfirst($order['Ship_Status'] ?? 'Processing') ?></span>
                                         <?php else: ?>
-                                            <span class="badge bg-secondary">Unshipped</span>
+                                            <span class="badge bg-secondary">N/A</span>
                                         <?php endif; ?>
                                     </td>
                                     <td><small><?= date('M d, Y', strtotime($order['Order_Date'])) ?></small></td>
                                     <td>
-                                        <button class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#statusModal<?= $order['Order_ID'] ?>">
-                                            <i class="bi bi-pencil"></i> Update
-                                        </button>
+                                        <div class="btn-group btn-group-sm">
+                                            <button class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#statusModal<?= $order['Order_ID'] ?>">
+                                                <i class="bi bi-pencil"></i> Update
+                                            </button>
+                                            <a href="?delete=1&id=<?= $order['Order_ID'] ?>" class="btn btn-outline-danger" onclick="return confirm('Delete this order permanently from database?')">
+                                                <i class="bi bi-trash"></i> Delete
+                                            </a>
+                                        </div>
                                     </td>
                                 </tr>
                                 
@@ -207,19 +305,16 @@ $title = "Order Management";
                                                             <option value="Cancelled" <?= ($order['Order_PayStat'] ?? '') === 'Cancelled' ? 'selected' : '' ?>>Cancelled</option>
                                                         </select>
                                                     </div>
-                                                    <?php if ($order['Ship_ID']): ?>
-                                                        <div class="mb-3">
-                                                            <label class="form-label">Shipment Status (<code><?= $order['Ship_ID'] ?></code>)</label>
+                                                    <div class="mb-3">
+                                                            <label class="form-label">Order / Shipment Status</label>
                                                             <select name="ship_status" class="form-select">
-                                                                <option value="Processing" <?= ($order['Ship_Status'] ?? '') === 'Processing' ? 'selected' : '' ?>>Processing</option>
-                                                                <option value="Picked Up" <?= ($order['Ship_Status'] ?? '') === 'Picked Up' ? 'selected' : '' ?>>Picked Up</option>
-                                                                <option value="In Transit" <?= ($order['Ship_Status'] ?? '') === 'In Transit' ? 'selected' : '' ?>>In Transit</option>
-                                                                <option value="Delivered" <?= ($order['Ship_Status'] ?? '') === 'Delivered' ? 'selected' : '' ?>>Delivered</option>
+                                                                <option value="Pending"    <?= ($order['Order_Status'] ?? '') === 'Pending'    ? 'selected' : '' ?>>Pending (Awaiting Seller)</option>
+                                                                <option value="Processing" <?= ($order['Order_Status'] ?? '') === 'Processing' ? 'selected' : '' ?>>Processing (Accepted)</option>
+                                                                <option value="Shipped"    <?= ($order['Order_Status'] ?? '') === 'Shipped'    ? 'selected' : '' ?>>Shipped / In Transit</option>
+                                                                <option value="Delivered"  <?= ($order['Order_Status'] ?? '') === 'Delivered'  ? 'selected' : '' ?>>Delivered</option>
+                                                                <option value="Rejected"   <?= ($order['Order_Status'] ?? '') === 'Rejected'   ? 'selected' : '' ?>>Rejected</option>
                                                             </select>
                                                         </div>
-                                                    <?php else: ?>
-                                                        <input type="hidden" name="ship_status" value="">
-                                                    <?php endif; ?>
                                                 </div>
                                                 <div class="modal-footer">
                                                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -229,9 +324,9 @@ $title = "Order Management";
                                         </div>
                                     </div>
                                 </div>
-                            <?php endwhile; ?>
+                            <?php endforeach; ?>
                         <?php else: ?>
-                            <tr><td colspan="7" class="text-center text-muted py-4">No orders found.</td></tr>
+                            <tr><td colspan="8" class="text-center text-muted py-4">No orders found.</td></tr>
                         <?php endif; ?>
                     </tbody>
                 </table>

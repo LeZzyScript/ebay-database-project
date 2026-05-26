@@ -8,14 +8,14 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     echo json_encode(['success' => false, 'message' => 'Not logged in']);
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-$userId = $_SESSION['account_id'];
+$uid = $_SESSION['firebase_uid'];
 $prodId = trim($_POST['prod_id'] ?? '');
 
 if (!$prodId) {
@@ -23,14 +23,6 @@ if (!$prodId) {
     exit;
 }
 
-$stmt = $conn->prepare("DELETE FROM Wishlist WHERE Wish_UserID = ? AND Wish_ProdID = ?");
-$stmt->bind_param("ss", $userId, $prodId);
-
-if (!$stmt->execute()) {
-    echo json_encode(['success' => false, 'message' => 'Failed to remove from wishlist']);
-    $stmt->close();
-    exit;
-}
-$stmt->close();
+deleteData("wishlists/{$uid}/items/{$prodId}");
 
 echo json_encode(['success' => true]);

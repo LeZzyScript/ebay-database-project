@@ -1,69 +1,135 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     header('Location: ../auth/signin.php?redirect=buyer/orders.php');
     exit;
 }
 
-require_once('../config/db.php');
-$userId = $_SESSION['account_id'];
+require_once('../config/firebase.php');
+$uid = $_SESSION['firebase_uid'];
 
-// Advance shipment statuses based on dates
-$today = date('Y-m-d');
-$conn->query("UPDATE Shipment SET Ship_Status = 'Delivered' WHERE Ship_Status != 'Delivered' AND Ship_DelivDate <= '$today'");
-$conn->query("UPDATE Shipment SET Ship_Status = 'In Transit' WHERE Ship_Status IN ('Processing', 'Picked Up') AND Ship_TransitDate <= '$today' AND Ship_DelivDate > '$today'");
-$conn->query("UPDATE Shipment SET Ship_Status = 'Picked Up' WHERE Ship_Status = 'Processing' AND Ship_PickupDate <= '$today' AND Ship_TransitDate > '$today'");
+// Fetch won auctions pending checkout
+$pendingAuctions = [];
+$allAuctions = getData('auctions') ?: [];
+foreach ($allAuctions as $aucId => $aucData) {
+    $aucStatus = $aucData['status'] ?? 'active';
+    $endDate = $aucData['endDate'] ?? '';
+    
+    // Treat as ended if status is ended or if active but past end date
+    $isEnded = ($aucStatus === 'ended') || ($aucStatus === 'active' && strtotime($endDate) < time());
+    
+    if ($isEnded) {
+        // Find highest bid
+        $highestBid = 0;
+        $winnerId = null;
+        $bidsData = $aucData['bids'] ?? [];
+        if ($bidsData) {
+            foreach ($bidsData as $bid) {
+                $amt = floatval($bid['amount'] ?? 0);
+                if ($amt > $highestBid) {
+                    $highestBid = $amt;
+                    $winnerId = $bid['userId'] ?? null;
+                }
+            }
+        }
+        
+        // If current user is the winner and has not paid yet
+        if ($winnerId === $uid) {
+            $prodId = $aucData['productId'] ?? '';
+            $product = getData("products/{$prodId}");
+            if ($product) {
+                $pendingAuctions[] = [
+                    'aucId' => $aucId,
+                    'prodId' => $prodId,
+                    'title' => $product['title'] ?? 'Unknown Item',
+                    'image' => $product['image'] ?? '',
+                    'price' => $highestBid,
+                    'endDate' => $endDate
+                ];
+            }
+        }
+    }
+}
 
-// Fetch all orders for this buyer, newest first
+// Fetch all orders for this buyer
+$ordersData = getData('orders');
 $orders = [];
-$stmt = $conn->prepare("
-    SELECT o.*,
-           s.Ship_ID, s.Ship_Status, s.Ship_PickupDate, s.Ship_TransitDate, s.Ship_DelivDate
-    FROM `Order` o
-    LEFT JOIN Shipment s ON o.Order_ID = s.Ship_OrderID
-    WHERE o.Order_UserID = ?
-    ORDER BY o.Order_Date DESC
-");
-$stmt->bind_param("s", $userId);
-$stmt->execute();
-$res = $stmt->get_result();
-while ($row = $res->fetch_assoc()) {
-    $orders[] = $row;
+if ($ordersData) {
+    foreach ($ordersData as $orderId => $orderData) {
+        if (($orderData['userId'] ?? '') === $uid) {
+            // Calculate shipment dates based on order date
+            $orderDate = $orderData['date'] ?? date('Y-m-d');
+            $orderDateObj = new DateTime($orderDate);
+            $pickupDate = clone $orderDateObj;
+            $pickupDate->modify('+2 days');
+            $transitDate = clone $pickupDate;
+            $transitDate->modify('+3 days');
+            $deliveryDate = clone $transitDate;
+            $deliveryDate->modify('+2 days');
+            
+            // Map order status to shipment status
+            $status = $orderData['status'] ?? 'Processing';
+            $shipStatus = 'Processing';
+            if ($status === 'Shipped') {
+                $shipStatus = 'In Transit';
+            } elseif ($status === 'Delivered') {
+                $shipStatus = 'Delivered';
+            }
+            
+            $orders[] = [
+                'Order_ID' => $orderId,
+                'Order_Date' => $orderDate,
+                'Order_Total' => $orderData['total'] ?? 0,
+                'Order_PayStat' => $orderData['paymentStatus'] ?? 'Paid',
+                'Order_ReqStatus' => ($status === 'Pending') ? 'Pending' : (($status === 'Rejected') ? 'Rejected' : 'Approved'),
+                'Ship_ID' => ($status !== 'Pending' && $status !== 'Rejected') ? $orderId : null,
+                'Ship_Status' => $shipStatus,
+                'Ship_PickupDate' => $pickupDate->format('Y-m-d'),
+                'Ship_TransitDate' => $transitDate->format('Y-m-d'),
+                'Ship_DelivDate' => $deliveryDate->format('Y-m-d')
+            ];
+        }
+    }
 }
-$stmt->close();
 
-// Fetch feedbacks left by this user
+// Sort by date descending
+usort($orders, function($a, $b) {
+    return strtotime($b['Order_Date']) - strtotime($a['Order_Date']);
+});
+
+// Fetch feedbacks left by this user (dynamic fetch from Firebase)
 $feedbackMap = [];
-$stmtF = $conn->prepare("SELECT Feed_OrderID FROM Feedback WHERE Feed_UserID = ?");
-$stmtF->bind_param("s", $userId);
-$stmtF->execute();
-$resF = $stmtF->get_result();
-while ($row = $resF->fetch_assoc()) {
-    $feedbackMap[$row['Feed_OrderID']] = true;
+$allFeedbacks = getData('feedbacks') ?: [];
+foreach ($allFeedbacks as $fId => $fData) {
+    if (($fData['userId'] ?? '') === $uid) {
+        $feedbackMap[$fData['orderId']] = true;
+    }
 }
-$stmtF->close();
 
 // Fetch order items grouped by order_id
 $orderItems = [];
 if (!empty($orders)) {
-    $orderIds = array_column($orders, 'Order_ID');
-    $placeholders = implode(',', array_fill(0, count($orderIds), '?'));
-    $types = str_repeat('s', count($orderIds));
-    $stmtI = $conn->prepare("
-        SELECT oi.Item_OrderID, oi.Item_Qty, oi.Item_Price, oi.Item_Sub,
-               p.Prod_ID, p.Prod_Title, p.Prod_Image
-        FROM OrderItem oi
-        JOIN Product p ON oi.Item_ProdID = p.Prod_ID
-        WHERE oi.Item_OrderID IN ($placeholders)
-        ORDER BY oi.Item_ID
-    ");
-    $stmtI->bind_param($types, ...$orderIds);
-    $stmtI->execute();
-    $resI = $stmtI->get_result();
-    while ($item = $resI->fetch_assoc()) {
-        $orderItems[$item['Item_OrderID']][] = $item;
+    foreach ($orders as $ord) {
+        $orderId = $ord['Order_ID'];
+        $orderItemsData = getData("orders/{$orderId}/items");
+        if ($orderItemsData) {
+            foreach ($orderItemsData as $itemId => $itemData) {
+                $productId = $itemData['productId'] ?? '';
+                $product = getData("products/{$productId}");
+                if ($product) {
+                    $orderItems[$orderId][] = [
+                        'Item_OrderID' => $orderId,
+                        'Item_Qty' => $itemData['quantity'] ?? 1,
+                        'Item_Price' => $itemData['price'] ?? 0,
+                        'Item_Sub' => $itemData['subtotal'] ?? 0,
+                        'Prod_ID' => $productId,
+                        'Prod_Title' => $product['title'] ?? '',
+                        'Prod_Image' => $product['image'] ?? ''
+                    ];
+                }
+            }
+        }
     }
-    $stmtI->close();
 }
 
 $title    = 'My Orders';
@@ -322,6 +388,34 @@ include('../layout/layout.php');
 <div class="orders-wrap">
     <h1 class="orders-title">My Orders</h1>
     <div class="orders-count"><?= count($orders) ?> order<?= count($orders) !== 1 ? 's' : '' ?> total</div>
+
+    <?php if (!empty($pendingAuctions)): ?>
+        <div style="background:#fff3cd; border:1px solid #ffeeba; border-radius:12px; padding:20px; margin-bottom:24px;">
+            <h2 style="font-size:16px; font-weight:700; color:#856404; margin-bottom:12px; display:flex; align-items:center; gap:8px;"><i class="bi bi-trophy-fill" style="color:#f5af02; font-size: 1.2rem;"></i> Auctions Won — Pending Checkout</h2>
+            <div style="display:flex; flex-direction:column; gap:12px;">
+                <?php foreach ($pendingAuctions as $auc): ?>
+                    <div style="display:flex; justify-content:space-between; align-items:center; background:#fff; padding:16px; border:1px solid #ffeeba; border-radius:8px; gap:16px; flex-wrap:wrap;">
+                        <div style="display:flex; align-items:center; gap:16px;">
+                            <?php if (!empty($auc['image'])): ?>
+                                <img src="<?= htmlspecialchars($auc['image']) ?>" alt="Item Image" style="width:60px; height:60px; object-fit:cover; border-radius:8px; border:1px solid var(--border); background:#fafafa;">
+                            <?php else: ?>
+                                <div style="width:60px; height:60px; border-radius:8px; background:#f0f0f0; display:flex; align-items:center; justify-content:center; border:1px solid var(--border); color:var(--muted); font-size:24px;">📦</div>
+                            <?php endif; ?>
+                            <div>
+                                <div style="font-weight:600; font-size:14px; color:var(--text);"><?= htmlspecialchars($auc['title']) ?></div>
+                                <div style="font-size:12px; color:var(--muted); margin-top:2px;">Winning Bid: <strong style="color:var(--text)">₱<?= number_format($auc['price'], 2) ?></strong></div>
+                            </div>
+                        </div>
+                        <div>
+                            <a href="../checkout/checkout.php?auction_id=<?= urlencode($auc['aucId']) ?>" style="background:var(--blue); color:#fff; padding:8px 20px; border-radius:20px; font-size:13px; font-weight:600; text-decoration:none; display:inline-flex; align-items:center; gap:6px; transition:background 0.2s; font-family:var(--font);" onmouseover="this.style.background='#2b55d9'" onmouseout="this.style.background='var(--blue)'">
+                                <i class="bi bi-cart-check-fill"></i> Checkout
+                            </a>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+    <?php endif; ?>
 
     <?php if (empty($orders)): ?>
         <div class="orders-empty">

@@ -8,14 +8,14 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     echo json_encode(['success' => false, 'message' => 'Not logged in']);
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-$userId = $_SESSION['account_id'];
+$uid = $_SESSION['firebase_uid'];
 $prodId = trim($_POST['prod_id'] ?? '');
 
 if (!$prodId) {
@@ -23,32 +23,28 @@ if (!$prodId) {
     exit;
 }
 
-// Get current product price to store at time of wishlisting
-$stmt = $conn->prepare("SELECT Prod_Price, Prod_Title FROM Product WHERE Prod_ID = ? AND Prod_Status = 'active'");
-$stmt->bind_param("s", $prodId);
-$stmt->execute();
-$prod = $stmt->get_result()->fetch_assoc();
-$stmt->close();
+// Get current product to verify it exists
+$product = getData("products/{$prodId}");
 
-if (!$prod) {
+if (!$product) {
     echo json_encode(['success' => false, 'message' => 'Product not found']);
     exit;
 }
 
 $today = date('Y-m-d');
 
-// INSERT — ignore if already wishlisted (idempotent)
-$stmt2 = $conn->prepare("
-    INSERT IGNORE INTO Wishlist (Wish_UserID, Wish_ProdID, Wish_DateAdd, Wish_PriceAdd)
-    VALUES (?, ?, ?, ?)
-");
-$stmt2->bind_param("sssd", $userId, $prodId, $today, $prod['Prod_Price']);
+// Check if already wishlisted
+$existing = getData("wishlists/{$uid}/items/{$prodId}");
 
-if (!$stmt2->execute()) {
-    echo json_encode(['success' => false, 'message' => 'Failed to add to wishlist']);
-    $stmt2->close();
+if ($existing) {
+    echo json_encode(['success' => true, 'message' => '"' . ($product['title'] ?? 'Item') . '" is already in your Watchlist']);
     exit;
 }
-$stmt2->close();
 
-echo json_encode(['success' => true, 'message' => '"' . $prod['Prod_Title'] . '" added to Watchlist']);
+// Add to wishlist
+setData("wishlists/{$uid}/items/{$prodId}", [
+    'dateAdded' => $today,
+    'priceAdded' => $product['price'] ?? 0
+]);
+
+echo json_encode(['success' => true, 'message' => '"' . ($product['title'] ?? 'Item') . '" added to Watchlist']);

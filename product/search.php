@@ -1,63 +1,69 @@
 <?php
 session_start();
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
 $q = trim($_GET['q'] ?? '');
 $page = max(1, intval($_GET['page'] ?? 1));
 $limit = 24; // 24 items (e.g., 2 cols x 12 rows)
 $offset = ($page - 1) * $limit;
 
-// Base query for counting total items
-$countSql = "SELECT COUNT(*) as total FROM Product p LEFT JOIN Category c ON p.Prod_CatID = c.Cat_ID WHERE p.Prod_Status = 'active'";
-$params = [];
-$types = '';
+// Fetch all products and categories
+$productsData = getData('products');
+$categoriesData = getData('categories');
 
-if ($q !== '') {
-    $countSql .= " AND (p.Prod_Title LIKE ? OR c.Cat_Name LIKE ?)";
-    $likeQ = '%' . $q . '%';
-    $params[] = $likeQ;
-    $params[] = $likeQ;
-    $types .= 'ss';
+// Filter products based on search query
+$filteredProducts = [];
+if ($productsData) {
+    foreach ($productsData as $prodId => $prodData) {
+        if (($prodData['status'] ?? '') !== 'active') {
+            continue;
+        }
+        
+        if ($q !== '') {
+            $title = strtolower($prodData['title'] ?? '');
+            $catId = $prodData['categoryId'] ?? '';
+            $catName = '';
+            if ($catId && isset($categoriesData[$catId])) {
+                $catName = strtolower($categoriesData[$catId]['name'] ?? '');
+            }
+            $searchQ = strtolower($q);
+            
+            if (strpos($title, $searchQ) === false && strpos($catName, $searchQ) === false) {
+                continue;
+            }
+        }
+        
+        $filteredProducts[] = array_merge(['Prod_ID' => $prodId], $prodData);
+    }
 }
 
-$stmtCount = $conn->prepare($countSql);
-if (!empty($params)) {
-    $stmtCount->bind_param($types, ...$params);
-}
-$stmtCount->execute();
-$totalRes = $stmtCount->get_result()->fetch_assoc();
-$totalItems = $totalRes['total'];
-$stmtCount->close();
+// Sort by date added (descending)
+usort($filteredProducts, function($a, $b) {
+    return strtotime($b['dateAdded'] ?? '0') - strtotime($a['dateAdded'] ?? '0');
+});
 
+$totalItems = count($filteredProducts);
 $totalPages = ceil($totalItems / $limit);
 if ($totalPages < 1) $totalPages = 1;
 if ($page > $totalPages) $page = $totalPages;
 
-// Main query for fetching products
-$sql = "SELECT p.*, c.Cat_Name 
-        FROM Product p 
-        LEFT JOIN Category c ON p.Prod_CatID = c.Cat_ID 
-        WHERE p.Prod_Status = 'active'";
+// Apply pagination
+$paginatedProducts = array_slice($filteredProducts, $offset, $limit);
 
-if ($q !== '') {
-    $sql .= " AND (p.Prod_Title LIKE ? OR c.Cat_Name LIKE ?)";
-}
-$sql .= " ORDER BY p.Prod_DateAdd DESC LIMIT ? OFFSET ?";
-
-$params[] = $limit;
-$params[] = $offset;
-$types .= 'ii';
-
-$stmt = $conn->prepare($sql);
-$stmt->bind_param($types, ...$params);
-$stmt->execute();
-$res = $stmt->get_result();
-
+// Map to old field names for compatibility
 $products = [];
-while ($row = $res->fetch_assoc()) {
-    $products[] = $row;
+foreach ($paginatedProducts as $prod) {
+    $products[] = [
+        'Prod_ID' => $prod['Prod_ID'],
+        'Prod_Title' => $prod['title'] ?? '',
+        'Prod_Price' => $prod['price'] ?? 0,
+        'Prod_Image' => $prod['image'] ?? '',
+        'Prod_Stock' => $prod['stock'] ?? 0,
+        'Prod_Status' => $prod['status'] ?? '',
+        'Prod_CatID' => $prod['categoryId'] ?? '',
+        'Cat_Name' => isset($categoriesData[$prod['categoryId'] ?? '']) ? ($categoriesData[$prod['categoryId']]['name'] ?? '') : ''
+    ];
 }
-$stmt->close();
 
 $title = $q !== '' ? 'Search: ' . htmlspecialchars($q) : 'Browse All Products';
 $basePath = '../';

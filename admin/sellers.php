@@ -1,48 +1,78 @@
 <?php
 require_once "includes/auth.php";
 requireAdminLogin();
-require_once "../config/db.php";
+require_once "../config/firebase.php";
 
 $message = '';
 $messageType = '';
 
 // Verify business
 if (isset($_GET['verify']) && isset($_GET['id'])) {
-    $bid = $conn->real_escape_string($_GET['id']);
-    if ($conn->query("UPDATE Business SET Bus_Verified = 1 WHERE Bus_ID = '$bid'")) {
-        $message = "Business verified successfully!";
-        $messageType = "success";
-    }
+    $uid = $_GET['id'];
+    updateData("users/{$uid}/sellerData/business/verified", true);
+    $message = "Business verified successfully!";
+    $messageType = "success";
 }
 
 // Reject business
 if (isset($_GET['reject']) && isset($_GET['id'])) {
-    $bid = $conn->real_escape_string($_GET['id']);
-    if ($conn->query("DELETE FROM Business WHERE Bus_ID = '$bid'")) {
-        $message = "Business application rejected and removed.";
-        $messageType = "danger";
+    $uid = $_GET['id'];
+    updateData("users/{$uid}/sellerData/business", null);
+    $message = "Business application rejected and removed.";
+    $messageType = "danger";
+}
+
+// Get all users and filter for sellers
+$pendingSellers = [];
+$verifiedSellers = [];
+$allUsers = getData('users');
+
+if ($allUsers) {
+    foreach ($allUsers as $uid => $userData) {
+        if (($userData['accountType'] ?? '') !== 'seller') {
+            continue;
+        }
+        
+        $profile = $userData['profile'] ?? [];
+        $business = $userData['sellerData']['business'] ?? null;
+        
+        if (!$business) {
+            continue;
+        }
+        
+        $sellerData = [
+            'Bus_ID' => $uid,
+            'Bus_Name' => $business['name'] ?? '',
+            'Bus_TaxID' => $business['taxId'] ?? '',
+            'Bus_RegNum' => $business['regNumber'] ?? '',
+            'Bus_Type' => $business['type'] ?? '',
+            'Bus_Phone' => $business['phone'] ?? '',
+            'Bus_Address' => $business['address'] ?? '',
+            'Bus_Verified' => $business['verified'] ?? false,
+            'User_FName' => $profile['firstName'] ?? '',
+            'User_LName' => $profile['lastName'] ?? '',
+            'User_Email' => $profile['email'] ?? '',
+            'User_Contact' => $profile['contact'] ?? '',
+            'Sell_JoinDate' => $userData['dateRegistered'] ?? date('Y-m-d')
+        ];
+        
+        if ($business['verified'] ?? false) {
+            $verifiedSellers[] = $sellerData;
+        } else {
+            $pendingSellers[] = $sellerData;
+        }
     }
 }
 
-// Get pending sellers with business info
-$query = "SELECT b.*, s.Sell_ID, s.Sell_UserID, s.Sell_Status, 
-                 u.User_FName, u.User_LName, u.User_Email, u.User_Contact
-          FROM Business b
-          JOIN Seller s ON b.Bus_SellID = s.Sell_ID
-          JOIN User u ON s.Sell_UserID = u.User_ID
-          WHERE b.Bus_Verified = 0
-          ORDER BY s.Sell_JoinDate DESC";
-$pendingSellers = $conn->query($query);
+// Sort pending by join date descending
+usort($pendingSellers, function($a, $b) {
+    return strtotime($b['Sell_JoinDate']) - strtotime($a['Sell_JoinDate']);
+});
 
-// Get verified sellers
-$query2 = "SELECT b.*, s.Sell_ID, s.Sell_UserID, s.Sell_Status, 
-                  u.User_FName, u.User_LName, u.User_Email, u.User_Contact
-           FROM Business b
-           JOIN Seller s ON b.Bus_SellID = s.Sell_ID
-           JOIN User u ON s.Sell_UserID = u.User_ID
-           WHERE b.Bus_Verified = 1
-           ORDER BY u.User_FName";
-$verifiedSellers = $conn->query($query2);
+// Sort verified by first name
+usort($verifiedSellers, function($a, $b) {
+    return strcmp($a['User_FName'], $b['User_FName']);
+});
 
 $title = "Seller Management";
 ?>
@@ -115,6 +145,9 @@ $title = "Seller Management";
                 <i class="bi bi-receipt"></i> Orders
             </a>
             <hr class="mx-3 my-3" style="border-color:rgba(255,255,255,0.1)">
+            <a href="../auth/logout.php" class="nav-link-custom d-block">
+                <i class="bi bi-box-arrow-right"></i> Logout
+            </a>
         </div>
     </div>
 
@@ -144,8 +177,8 @@ $title = "Seller Management";
                         <tr><th>Business Name</th><th>Owner</th><th>Tax ID</th><th>Reg Number</th><th>Business Type</th><th>Phone</th><th>Actions</th></tr>
                     </thead>
                     <tbody>
-                        <?php if ($pendingSellers && $pendingSellers->num_rows > 0): ?>
-                            <?php while ($row = $pendingSellers->fetch_assoc()): ?>
+                        <?php if (!empty($pendingSellers)): ?>
+                            <?php foreach ($pendingSellers as $row): ?>
                                 <tr>
                                     <td><strong><?= htmlspecialchars($row['Bus_Name']) ?></strong></td>
                                     <td><?= htmlspecialchars($row['User_FName'] . ' ' . $row['User_LName']) ?><br><small class="text-muted"><?= $row['User_Email'] ?></small></td>
@@ -158,7 +191,7 @@ $title = "Seller Management";
                                         <a href="?reject=1&id=<?= $row['Bus_ID'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('Reject this business application?')"><i class="bi bi-x-lg"></i> Reject</a>
                                     </td>
                                 </tr>
-                            <?php endwhile; ?>
+                            <?php endforeach; ?>
                         <?php else: ?>
                             <tr><td colspan="7" class="text-center text-muted py-4">No pending verifications.</td></tr>
                         <?php endif; ?>
@@ -176,8 +209,8 @@ $title = "Seller Management";
                         <tr><th>Business Name</th><th>Owner</th><th>Business Type</th><th>Phone</th><th>Address</th><th>Status</th></tr>
                     </thead>
                     <tbody>
-                        <?php if ($verifiedSellers && $verifiedSellers->num_rows > 0): ?>
-                            <?php while ($row = $verifiedSellers->fetch_assoc()): ?>
+                        <?php if (!empty($verifiedSellers)): ?>
+                            <?php foreach ($verifiedSellers as $row): ?>
                                 <tr>
                                     <td><strong><?= htmlspecialchars($row['Bus_Name']) ?></strong></td>
                                     <td><?= htmlspecialchars($row['User_FName'] . ' ' . $row['User_LName'])?></td>
@@ -186,7 +219,7 @@ $title = "Seller Management";
                                     <td><small><?= htmlspecialchars(substr($row['Bus_Address'], 0, 50)) ?>...</small></td>
                                     <td><span class="status-verified"><i class="bi bi-check-circle-fill me-1"></i>Verified</span></td>
                                 </tr>
-                            <?php endwhile; ?>
+                            <?php endforeach; ?>
                         <?php else: ?>
                             <tr><td colspan="6" class="text-center text-muted py-4">No verified sellers yet.</td></tr>
                         <?php endif; ?>

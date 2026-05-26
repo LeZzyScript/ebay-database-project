@@ -1,33 +1,52 @@
 <?php
 require_once "includes/auth.php";
 requireAdminLogin();
-require_once "../config/db.php";
+require_once "../config/firebase.php";
 $stats = [];
 
 // Buyers
-$r = $conn->query("SELECT COUNT(*) as c FROM User WHERE User_AccType = 'buyer'");
-$stats['total_buyers'] = $r->fetch_assoc()['c'];
+$allUsers = getData('users');
+$stats['total_buyers'] = 0;
+$stats['total_sellers'] = 0;
+$stats['new_users_week'] = 0;
+$stats['suspended_users'] = 0;
+$stats['pending_verification'] = 0;
 
-// Sellers
-$r = $conn->query("SELECT COUNT(*) as c FROM User WHERE User_AccType = 'seller'");
-$stats['total_sellers'] = $r->fetch_assoc()['c'];
+$weekAgo = date('Y-m-d', strtotime('-7 days'));
 
-// New users (buyers + sellers) last 7 days
-$r = $conn->query("SELECT COUNT(*) as c FROM User WHERE User_AccType IN ('buyer','seller') AND User_DateReg >= DATE_SUB(NOW(), INTERVAL 7 DAY)");
-$stats['new_users_week'] = $r->fetch_assoc()['c'];
-
-// Suspended user accounts (buyers + sellers)
-$r = $conn->query("SELECT COUNT(*) as c FROM User WHERE User_AccType IN ('buyer','seller') AND User_Status = 'suspended'");
-$stats['suspended_users'] = $r->fetch_assoc()['c'];
-
-// Pending seller verification
-$r = $conn->query("SELECT COUNT(*) as c FROM Seller s JOIN Business b ON s.Sell_ID = b.Bus_SellID WHERE b.Bus_Verified = 0");
-$stats['pending_verification'] = $r->fetch_assoc()['c'] ?? 0;
+if ($allUsers) {
+    foreach ($allUsers as $uid => $userData) {
+        $accountType = $userData['accountType'] ?? '';
+        $dateReg = $userData['dateRegistered'] ?? '';
+        $status = $userData['status'] ?? 'active';
+        
+        if ($accountType === 'buyer') {
+            $stats['total_buyers']++;
+            if (strtotime($dateReg) >= strtotime($weekAgo)) {
+                $stats['new_users_week']++;
+            }
+            if ($status === 'suspended') {
+                $stats['suspended_users']++;
+            }
+        } elseif ($accountType === 'seller') {
+            $stats['total_sellers']++;
+            if (strtotime($dateReg) >= strtotime($weekAgo)) {
+                $stats['new_users_week']++;
+            }
+            if ($status === 'suspended') {
+                $stats['suspended_users']++;
+            }
+            // Check pending verification
+            if (isset($userData['sellerData']['business']['verified']) && !$userData['sellerData']['business']['verified']) {
+                $stats['pending_verification']++;
+            }
+        }
+    }
+}
 
 // Total products
-$r = $conn->query("SELECT COUNT(*) as c FROM Product");
-$stats['total_products'] = $r->fetch_assoc()['c'] ?? 0;
-
+$allProducts = getData('products');
+$stats['total_products'] = $allProducts ? count($allProducts) : 0;
 
 $title = "Admin Dashboard";
 ?>
@@ -135,6 +154,9 @@ $title = "Admin Dashboard";
                 <i class="bi bi-receipt"></i> Orders
             </a>
             <hr class="mx-3 my-3" style="border-color:rgba(255,255,255,0.1)">
+            <a href="../auth/logout.php" class="nav-link-custom d-block">
+                <i class="bi bi-box-arrow-right"></i> Logout
+            </a>
         </div>
     </div>
     <!-- Main Content -->

@@ -1,12 +1,12 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     header('Location: ../auth/signin.php');
     exit;
 }
 
-require_once('../config/db.php');
-$userId = $_SESSION['account_id'];
+require_once('../config/firebase.php');
+$uid = $_SESSION['firebase_uid'];
 $orderId = $_GET['order_id'] ?? '';
 
 if (empty($orderId)) {
@@ -15,48 +15,69 @@ if (empty($orderId)) {
     exit;
 }
 
-// Advance shipment statuses based on dates
-$today = date('Y-m-d');
-$conn->query("UPDATE Shipment SET Ship_Status = 'Delivered' WHERE Ship_Status != 'Delivered' AND Ship_DelivDate <= '$today'");
-$conn->query("UPDATE Shipment SET Ship_Status = 'In Transit' WHERE Ship_Status IN ('Processing', 'Picked Up') AND Ship_TransitDate <= '$today' AND Ship_DelivDate > '$today'");
-$conn->query("UPDATE Shipment SET Ship_Status = 'Picked Up' WHERE Ship_Status = 'Processing' AND Ship_PickupDate <= '$today' AND Ship_TransitDate > '$today'");
+// Fetch Order details
+$order = getData("orders/{$orderId}");
 
-// Fetch Order and Shipment details
-$stmt = $conn->prepare("
-    SELECT o.Order_Date, o.Order_Total, o.Order_ShipAdd,
-           s.Ship_ID, s.Ship_Status, s.Ship_PickupDate, s.Ship_TransitDate, s.Ship_DelivDate, s.Ship_Location
-    FROM `Order` o
-    LEFT JOIN Shipment s ON o.Order_ID = s.Ship_OrderID
-    WHERE o.Order_ID = ? AND o.Order_UserID = ?
-");
-$stmt->bind_param("ss", $orderId, $userId);
-$stmt->execute();
-$details = $stmt->get_result()->fetch_assoc();
-$stmt->close();
-
-if (!$details) {
+if (!$order || ($order['userId'] ?? '') !== $uid) {
     $_SESSION['flash'] = "Order not found or access denied.";
     header("Location: ../buyer/dashboard.php");
     exit;
 }
 
-
-
 // Fetch Order Items
 $items = [];
-$stmtI = $conn->prepare("
-    SELECT oi.Item_Qty, oi.Item_Price, p.Prod_Title, p.Prod_Image 
-    FROM OrderItem oi
-    JOIN Product p ON oi.Item_ProdID = p.Prod_ID
-    WHERE oi.Item_OrderID = ?
-");
-$stmtI->bind_param("s", $orderId);
-$stmtI->execute();
-$resI = $stmtI->get_result();
-while ($row = $resI->fetch_assoc()) {
-    $items[] = $row;
+$orderItems = getData("orders/{$orderId}/items");
+if ($orderItems) {
+    foreach ($orderItems as $itemId => $itemData) {
+        $productId = $itemData['productId'] ?? '';
+        $product = getData("products/{$productId}");
+        if ($product) {
+            $items[] = [
+                'Item_Qty' => $itemData['quantity'] ?? 1,
+                'Item_Price' => $itemData['price'] ?? 0,
+                'Prod_Title' => $product['title'] ?? '',
+                'Prod_Image' => $product['image'] ?? ''
+            ];
+        }
+    }
 }
-$stmtI->close();
+
+// For shipment tracking, we'll use order status as a proxy
+// In a real implementation, you'd have a separate shipments collection
+$today = date('Y-m-d');
+$orderDate = $order['date'] ?? $today;
+$status = $order['status'] ?? 'Processing';
+
+// Calculate estimated delivery dates (simplified)
+$orderDateObj = new DateTime($orderDate);
+$pickupDate = clone $orderDateObj;
+$pickupDate->modify('+2 days');
+$transitDate = clone $pickupDate;
+$transitDate->modify('+3 days');
+$deliveryDate = clone $transitDate;
+$deliveryDate->modify('+2 days');
+
+// Map order status to shipment status
+$shipmentStatus = 'Processing';
+if ($status === 'Processing') {
+    $shipmentStatus = 'Processing';
+} elseif ($status === 'Shipped') {
+    $shipmentStatus = 'In Transit';
+} elseif ($status === 'Delivered') {
+    $shipmentStatus = 'Delivered';
+}
+
+// Build details array for compatibility
+$details = [
+    'Order_Date' => $orderDate,
+    'Order_Total' => $order['total'] ?? 0,
+    'Order_ShipAdd' => $order['shippingAddress'] ?? '',
+    'Ship_Status' => $shipmentStatus,
+    'Ship_PickupDate' => $pickupDate->format('Y-m-d'),
+    'Ship_TransitDate' => $transitDate->format('Y-m-d'),
+    'Ship_DelivDate' => $deliveryDate->format('Y-m-d'),
+    'Ship_Location' => $shipmentStatus === 'Delivered' ? 'Delivered' : 'Philippines'
+];
 
 $title = "Track Shipment";
 $basePath = '../';
@@ -245,56 +266,70 @@ if ($progressIndex === false) $progressIndex = 0;
     </div>
     
     <div class="track-card">
-        <div class="est-delivery">
-            <?php if ($currentStatus === 'Delivered'): ?>
-                Delivered on <?= date('D, M j', strtotime($details['Ship_DelivDate'])) ?>
-            <?php else: ?>
-                Estimated Delivery: <?= date('D, M j', strtotime($details['Ship_DelivDate'])) ?>
-            <?php endif; ?>
-        </div>
-        
-        <?php
-            $width = ($progressIndex / (count($steps) - 1)) * 100;
-        ?>
-        <div class="timeline">
-            <div class="timeline-fill" style="width: <?= $width ?>%;"></div>
+        <?php if ($status === 'Pending'): ?>
+            <div style="text-align:center; padding: 24px 0;">
+                <i class="bi bi-hourglass-split" style="font-size:4rem; color:var(--muted); display:block; margin-bottom:16px;"></i>
+                <div class="est-delivery" style="color:var(--text); margin-bottom:10px;">Awaiting Seller Acceptance</div>
+                <p style="color:var(--muted); font-size:14px; max-width: 500px; margin: 0 auto;">Shipment tracking and estimated delivery will begin as soon as the seller accepts your order.</p>
+            </div>
+        <?php elseif ($status === 'Rejected'): ?>
+            <div style="text-align:center; padding: 24px 0;">
+                <i class="bi bi-x-circle" style="font-size:4rem; color:#e53238; display:block; margin-bottom:16px;"></i>
+                <div class="est-delivery" style="color:#e53238; margin-bottom:10px;">Order Rejected</div>
+                <p style="color:var(--muted); font-size:14px; max-width: 500px; margin: 0 auto;">This order has been rejected by the seller.</p>
+            </div>
+        <?php else: ?>
+            <div class="est-delivery">
+                <?php if ($currentStatus === 'Delivered'): ?>
+                    Delivered on <?= date('D, M j', strtotime($details['Ship_DelivDate'])) ?>
+                <?php else: ?>
+                    Estimated Delivery: <?= date('D, M j', strtotime($details['Ship_DelivDate'])) ?>
+                <?php endif; ?>
+            </div>
             
-            <?php foreach ($steps as $i => $step): 
-                $class = '';
-                $icon = '';
-                if ($i < $progressIndex) {
-                    $class = 'completed';
-                    $icon = '<i class="bi bi-check2"></i>';
-                } elseif ($i === $progressIndex) {
-                    $class = 'active';
-                    $icon = '<i class="bi bi-circle-fill" style="font-size:8px;"></i>';
-                } else {
-                    $icon = '<i class="bi bi-circle-fill" style="font-size:8px;opacity:0;"></i>';
-                }
-                
-                $stepDate = '';
-                if ($step === 'Processing') $stepDate = $details['Order_Date'];
-                if ($step === 'Picked Up') $stepDate = $details['Ship_PickupDate'];
-                if ($step === 'In Transit') $stepDate = $details['Ship_TransitDate'];
-                if ($step === 'Delivered') $stepDate = $details['Ship_DelivDate'];
+            <?php
+                $width = ($progressIndex / (count($steps) - 1)) * 100;
             ?>
-                <div class="step <?= $class ?>">
-                    <div class="step-circle"><?= $icon ?></div>
-                    <div class="step-label"><?= $step ?></div>
-                    <div class="step-date"><?= date('M j', strtotime($stepDate)) ?></div>
-                </div>
-            <?php endforeach; ?>
-        </div>
-        
-        <div class="shipment-info">
-            <div class="shipment-icon"><i class="bi bi-truck"></i></div>
-            <div class="shipment-details">
-                <div class="shipment-name">Standard Delivery</div>
-                <div class="shipment-meta">
-                    Current Location: <?= htmlspecialchars($details['Ship_Location'] ?? 'Warehouse') ?>
+            <div class="timeline">
+                <div class="timeline-fill" style="width: <?= $width ?>%;"></div>
+                
+                <?php foreach ($steps as $i => $step): 
+                    $class = '';
+                    $icon = '';
+                    if ($i < $progressIndex) {
+                        $class = 'completed';
+                        $icon = '<i class="bi bi-check2"></i>';
+                    } elseif ($i === $progressIndex) {
+                        $class = 'active';
+                        $icon = '<i class="bi bi-circle-fill" style="font-size:8px;"></i>';
+                    } else {
+                        $icon = '<i class="bi bi-circle-fill" style="font-size:8px;opacity:0;"></i>';
+                    }
+                    
+                    $stepDate = '';
+                    if ($step === 'Processing') $stepDate = $details['Order_Date'];
+                    if ($step === 'Picked Up') $stepDate = $details['Ship_PickupDate'];
+                    if ($step === 'In Transit') $stepDate = $details['Ship_TransitDate'];
+                    if ($step === 'Delivered') $stepDate = $details['Ship_DelivDate'];
+                ?>
+                    <div class="step <?= $class ?>">
+                        <div class="step-circle"><?= $icon ?></div>
+                        <div class="step-label"><?= $step ?></div>
+                        <div class="step-date"><?= date('M j', strtotime($stepDate)) ?></div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+            
+            <div class="shipment-info">
+                <div class="shipment-icon"><i class="bi bi-truck"></i></div>
+                <div class="shipment-details">
+                    <div class="shipment-name">Standard Delivery</div>
+                    <div class="shipment-meta">
+                        Current Location: <?= htmlspecialchars($details['Ship_Location'] ?? 'Warehouse') ?>
+                    </div>
                 </div>
             </div>
-        </div>
+        <?php endif; ?>
     </div>
     
     <div class="track-card items-section">

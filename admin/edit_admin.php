@@ -2,7 +2,7 @@
 require_once "includes/auth.php";
 requireAdminLogin();
 requireAdminLevel(3); // Only Level 3 admins can edit admin accounts
-require_once "../config/db.php";
+require_once "../config/firebase.php";
 
 $message = '';
 $messageType = '';
@@ -15,21 +15,35 @@ if (empty($adminId)) {
 }
 
 // Fetch admin data
-$adminQuery = $conn->prepare("
-    SELECT a.*, u.User_ID, u.User_FName, u.User_LName, u.User_AccName, 
-           u.User_Email, u.User_Contact, u.User_Address, u.User_Status
-    FROM Admin a
-    JOIN User u ON a.Admin_UserID = u.User_ID
-    WHERE a.Admin_ID = ?
-");
-$adminQuery->bind_param("s", $adminId);
-$adminQuery->execute();
-$admin = $adminQuery->get_result()->fetch_assoc();
-
-if (!$admin) {
+$adminData = getData("admins/{$adminId}");
+if (!$adminData) {
     header("Location: add_admin.php");
     exit();
 }
+
+$userId = $adminData['userId'] ?? '';
+$userData = getData("users/{$userId}");
+if (!$userData) {
+    header("Location: add_admin.php");
+    exit();
+}
+
+$profile = $userData['profile'] ?? [];
+
+// Build admin array for compatibility with existing HTML
+$admin = [
+    'Admin_ID' => $adminId,
+    'Admin_UserID' => $userId,
+    'Admin_Level' => $adminData['level'] ?? 1,
+    'Admin_Perm' => $adminData['permissions'] ?? '',
+    'User_FName' => $profile['firstName'] ?? '',
+    'User_LName' => $profile['lastName'] ?? '',
+    'User_AccName' => $profile['accountName'] ?? '',
+    'User_Email' => $profile['email'] ?? '',
+    'User_Contact' => $profile['contact'] ?? '',
+    'User_Address' => $profile['address'] ?? '',
+    'User_Status' => $userData['status'] ?? 'active'
+];
 
 // Check if trying to edit self
 $isSelf = ($adminId == $_SESSION['admin_id']);
@@ -67,42 +81,32 @@ if (isset($_POST['update_admin'])) {
         $message = "Passwords do not match.";
         $messageType = "danger";
     } else {
-        $conn->begin_transaction();
         try {
-            // Update User table
-            $updateUser = $conn->prepare("
-                UPDATE User SET 
-                    User_FName = ?, 
-                    User_LName = ?, 
-                    User_AccName = ?, 
-                    User_Email = ?, 
-                    User_Contact = ?, 
-                    User_Address = ?,
-                    User_Status = ?
-                WHERE User_ID = ?
-            ");
-            $updateUser->bind_param("ssssssss", $fname, $lname, $username, $email, $contact, $address, $userStatus, $admin['User_ID']);
-            $updateUser->execute();
+            // Update user profile in Firebase Realtime Database
+            updateData("users/{$userId}/profile", [
+                'firstName' => $fname,
+                'lastName' => $lname,
+                'accountName' => $username,
+                'email' => $email,
+                'contact' => $contact,
+                'address' => $address
+            ]);
+            
+            // Update user status
+            updateData("users/{$userId}/status", $userStatus);
             
             // Update password if provided
             if (!empty($newPassword)) {
-                $hashedPassword = password_hash($newPassword, PASSWORD_BCRYPT);
-                $updatePass = $conn->prepare("UPDATE User SET User_Password = ? WHERE User_ID = ?");
-                $updatePass->bind_param("ss", $hashedPassword, $admin['User_ID']);
-                $updatePass->execute();
+                $auth->updateUser($userId, [
+                    'password' => $newPassword
+                ]);
             }
             
-            // Update Admin table
-            $updateAdmin = $conn->prepare("
-                UPDATE Admin SET 
-                    Admin_Level = ?, 
-                    Admin_Perm = ?
-                WHERE Admin_ID = ?
-            ");
-            $updateAdmin->bind_param("iss", $adminLevel, $adminPerm, $adminId);
-            $updateAdmin->execute();
-            
-            $conn->commit();
+            // Update admin record in Firebase Realtime Database
+            updateData("admins/{$adminId}", [
+                'level' => $adminLevel,
+                'permissions' => $adminPerm
+            ]);
             
             // If editing self, update session variables
             if ($isSelf) {
@@ -115,11 +119,24 @@ if (isset($_POST['update_admin'])) {
             $messageType = "success";
             
             // Refresh admin data
-            $adminQuery->execute();
-            $admin = $adminQuery->get_result()->fetch_assoc();
+            $adminData = getData("admins/{$adminId}");
+            $userData = getData("users/{$userId}");
+            $profile = $userData['profile'] ?? [];
+            $admin = [
+                'Admin_ID' => $adminId,
+                'Admin_UserID' => $userId,
+                'Admin_Level' => $adminData['level'] ?? 1,
+                'Admin_Perm' => $adminData['permissions'] ?? '',
+                'User_FName' => $profile['firstName'] ?? '',
+                'User_LName' => $profile['lastName'] ?? '',
+                'User_AccName' => $profile['accountName'] ?? '',
+                'User_Email' => $profile['email'] ?? '',
+                'User_Contact' => $profile['contact'] ?? '',
+                'User_Address' => $profile['address'] ?? '',
+                'User_Status' => $userData['status'] ?? 'active'
+            ];
             
-        } catch (Exception $e) {
-            $conn->rollback();
+        } catch (\Exception $e) {
             $message = "Failed to update admin: " . $e->getMessage();
             $messageType = "danger";
         }
@@ -180,9 +197,6 @@ $title = "Edit Admin - eBay Admin";
             <a href="products.php" class="nav-link-custom d-block">
                 <i class="bi bi-box"></i> Products
             </a>
-            <a href="categories.php" class="nav-link-custom d-block">
-                <i class="bi bi-tags"></i> Categories
-            </a>
 
             <a href="orders.php" class="nav-link-custom d-block">
                 <i class="bi bi-receipt"></i> Orders
@@ -191,6 +205,9 @@ $title = "Edit Admin - eBay Admin";
                 <i class="bi bi-person-badge"></i> Add Admin
             </a>
             <hr class="mx-3 my-3" style="border-color:rgba(255,255,255,0.1)">
+            <a href="../auth/logout.php" class="nav-link-custom d-block">
+                <i class="bi bi-box-arrow-right"></i> Logout
+            </a>
         </div>
     </div>
 

@@ -1,49 +1,57 @@
 <?php
 session_start();
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
 $title = "All Categories";
 $basePath = '../';
 include("../layout/layout.php");
 
 // -------------------------------------------------------------
-// AUTO-SETUP: Create table and insert data if it doesn't exist
+// AUTO-SETUP: Create default categories if they don't exist
 // -------------------------------------------------------------
-$conn->query("CREATE TABLE IF NOT EXISTS Category (
-    Cat_ID CHAR(8) PRIMARY KEY,
-    Cat_Name VARCHAR(100) NOT NULL,
-    Cat_Icon VARCHAR(50) NOT NULL,
-    Cat_Description TEXT,
-    Cat_Status VARCHAR(20) NOT NULL DEFAULT 'active'
-)");
-
-$res = $conn->query("SELECT COUNT(*) as count FROM Category");
-$row = $res->fetch_assoc();
-if ($row['count'] == 0) {
-    // Note: I swapped 'bi-tshirt' to 'bi-handbag' here to prevent the broken icon!
-    $conn->query("INSERT INTO Category (Cat_ID, Cat_Name, Cat_Icon, Cat_Description, Cat_Status) VALUES
-        ('CATG0001', 'Electronics', 'bi-phone', 'Phones, laptops, tablets and more', 'active'),
-        ('CATG0002', 'Clothing & shoes', 'bi-handbag', 'Brand-name clothing, shoes and accessories', 'active'),
-        ('CATG0003', 'Home & garden', 'bi-house-door', 'Furniture, decor, gardening tools', 'active'),
-        ('CATG0004', 'Motors', 'bi-car-front', 'Vehicle parts and accessories', 'active'),
-        ('CATG0005', 'Video games', 'bi-joystick', 'Games, consoles, gaming accessories', 'active'),
-        ('CATG0006', 'Jewelry & watches', 'bi-gem', 'Fine jewelry, luxury watches', 'active'),
-        ('CATG0007', 'Books', 'bi-book', 'Fiction, non-fiction, rare books', 'active'),
-        ('CATG0008', 'Sporting goods', 'bi-trophy', 'Sports equipment and gear', 'active'),
-        ('CATG0009', 'Toys', 'bi-dice-6', 'Action figures, board games, collectible toys', 'active'),
-        ('CATG0010', 'Collectibles & art', 'bi-collection', 'Rare cards, coins, vintage items, art', 'active'),
-        ('CATG0011', 'Business & industrial', 'bi-briefcase', 'Office supplies, industrial equipment', 'active'),
-        ('CATG0012', 'Health & beauty', 'bi-heart-pulse', 'Wellness products, cosmetics, skincare', 'active')
-    ");
+$allCategories = getData('categories');
+if (!$allCategories || empty($allCategories)) {
+    // Insert default categories
+    $defaultCategories = [
+        'CATG0001' => ['name' => 'Electronics', 'icon' => 'bi-phone', 'description' => 'Phones, laptops, tablets and more', 'status' => 'active'],
+        'CATG0002' => ['name' => 'Clothing & shoes', 'icon' => 'bi-handbag', 'description' => 'Brand-name clothing, shoes and accessories', 'status' => 'active'],
+        'CATG0003' => ['name' => 'Home & garden', 'icon' => 'bi-house-door', 'description' => 'Furniture, decor, gardening tools', 'status' => 'active'],
+        'CATG0004' => ['name' => 'Motors', 'icon' => 'bi-car-front', 'description' => 'Vehicle parts and accessories', 'status' => 'active'],
+        'CATG0005' => ['name' => 'Video games', 'icon' => 'bi-joystick', 'description' => 'Games, consoles, gaming accessories', 'status' => 'active'],
+        'CATG0006' => ['name' => 'Jewelry & watches', 'icon' => 'bi-gem', 'description' => 'Fine jewelry, luxury watches', 'status' => 'active'],
+        'CATG0007' => ['name' => 'Books', 'icon' => 'bi-book', 'description' => 'Fiction, non-fiction, rare books', 'status' => 'active'],
+        'CATG0008' => ['name' => 'Sporting goods', 'icon' => 'bi-trophy', 'description' => 'Sports equipment and gear', 'status' => 'active'],
+        'CATG0009' => ['name' => 'Toys', 'icon' => 'bi-dice-6', 'description' => 'Action figures, board games, collectible toys', 'status' => 'active'],
+        'CATG0010' => ['name' => 'Collectibles & art', 'icon' => 'bi-collection', 'description' => 'Rare cards, coins, vintage items, art', 'status' => 'active'],
+        'CATG0011' => ['name' => 'Business & industrial', 'icon' => 'bi-briefcase', 'description' => 'Office supplies, industrial equipment', 'status' => 'active'],
+        'CATG0012' => ['name' => 'Health & beauty', 'icon' => 'bi-heart-pulse', 'description' => 'Wellness products, cosmetics, skincare', 'status' => 'active']
+    ];
+    
+    foreach ($defaultCategories as $catId => $catData) {
+        setData("categories/{$catId}", $catData);
+    }
+    $allCategories = $defaultCategories;
 }
 
-// Fetch categories from DB
+// Fetch categories from Firebase
 $categories = [];
-$stmt = $conn->query("SELECT * FROM Category WHERE Cat_Status = 'active' ORDER BY Cat_Name ASC");
-if ($stmt) {
-    while ($row = $stmt->fetch_assoc()) {
-        $categories[] = $row;
+if ($allCategories) {
+    foreach ($allCategories as $catId => $catData) {
+        $status = $catData['status'] ?? '';
+        if ($status === 'active') {
+            $categories[] = [
+                'Cat_ID'          => $catId,
+                'Cat_Name'        => $catData['name'] ?? '',
+                'Cat_Icon'        => $catData['icon'] ?? 'bi-tag',
+                'Cat_Description' => $catData['description'] ?? '',
+                'Cat_Status'      => $status
+            ];
+        }
     }
+    // Sort by name
+    usort($categories, function($a, $b) {
+        return strcmp($a['Cat_Name'], $b['Cat_Name']);
+    });
 }
 ?>
 

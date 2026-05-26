@@ -1,29 +1,17 @@
 <?php
 session_start();
-if (!isset($_SESSION['account_id']) || empty($_SESSION['is_seller'])) {
+if (!isset($_SESSION['firebase_uid']) || empty($_SESSION['is_seller'])) {
     header('Location: ../buyer/dashboard.php');
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-$userId = $_SESSION['account_id'];
+$uid = $_SESSION['firebase_uid'];
 $errors  = [];
 $success = false;
 
-$stmt = $conn->prepare('
-    SELECT u.*, s.Sell_ID, s.Sell_Type, s.Sell_Status, s.Sell_JoinDate,
-           b.Bus_ID, b.Bus_Name, b.Bus_TaxID, b.Bus_RegNum, b.Bus_Type,
-           b.Bus_Phone, b.Bus_Address, b.Bus_Verified
-    FROM User u
-    LEFT JOIN Seller s ON u.User_ID = s.Sell_UserID
-    LEFT JOIN Business b ON s.Sell_ID = b.Bus_SellID
-    WHERE u.User_ID = ?
-');
-$stmt->bind_param('s', $userId);
-$stmt->execute();
-$user = $stmt->get_result()->fetch_assoc();
-$stmt->close();
+$user = getData("users/{$uid}");
 
 if (!$user) {
     session_destroy();
@@ -31,7 +19,11 @@ if (!$user) {
     exit;
 }
 
-$isBusiness = ($user['User_AccType'] === 'seller' && !empty($user['Bus_ID']));
+$profile = $user['profile'] ?? [];
+$sellerData = $user['sellerData'] ?? [];
+$business = $sellerData['business'] ?? [];
+
+$isBusiness = !empty($business);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!hash_equals($_SESSION['csrf_token'] ?? '', $_POST['csrf_token'] ?? '')) {
@@ -74,19 +66,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if (empty($errors)) {
-            $stmt = $conn->prepare('SELECT User_ID FROM User WHERE User_Email = ? AND User_ID != ?');
-            $stmt->bind_param('ss', $email, $userId);
-            $stmt->execute();
-            if ($stmt->get_result()->num_rows > 0) $errors[] = 'This email is already used by another account.';
-            $stmt->close();
+            // Check if email is already used by another user
+            $allUsers = getData('users');
+            if ($allUsers) {
+                foreach ($allUsers as $checkUid => $checkUser) {
+                    if ($checkUid !== $uid && isset($checkUser['profile']['email']) && $checkUser['profile']['email'] === $email) {
+                        $errors[] = 'This email is already used by another account.';
+                        break;
+                    }
+                }
+            }
         }
 
         if (empty($errors)) {
-            $stmt = $conn->prepare('SELECT User_ID FROM User WHERE User_AccName = ? AND User_ID != ?');
-            $stmt->bind_param('ss', $accname, $userId);
-            $stmt->execute();
-            if ($stmt->get_result()->num_rows > 0) $errors[] = 'This username is already taken.';
-            $stmt->close();
+            // Check if username is already taken by another user
+            $allUsers = getData('users');
+            if ($allUsers) {
+                foreach ($allUsers as $checkUid => $checkUser) {
+                    if ($checkUid !== $uid && isset($checkUser['profile']['accountName']) && strtolower($checkUser['profile']['accountName']) === strtolower($accname)) {
+                        $errors[] = 'This username is already taken.';
+                        break;
+                    }
+                }
+            }
         }
 
         if ($newPw !== '') {
@@ -95,56 +97,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if (empty($errors)) {
-            $conn->begin_transaction();
             try {
-                $stmt = $conn->prepare('UPDATE User SET User_FName=?, User_LName=?, User_AccName=?, User_Email=?, User_Contact=?, User_Address=? WHERE User_ID=?');
-                $stmt->bind_param('sssssss', $fname, $lname, $accname, $email, $contact, $address, $userId);
-                $stmt->execute();
-                $stmt->close();
+                // Update profile in Firebase
+                updateData("users/{$uid}/profile", [
+                    'firstName' => $fname,
+                    'lastName' => $lname,
+                    'accountName' => $accname,
+                    'email' => $email,
+                    'contact' => $contact,
+                    'address' => $address
+                ]);
 
+                // Update password in Firebase Auth if provided
                 if ($newPw !== '') {
-                    $hashed = password_hash($newPw, PASSWORD_BCRYPT);
-                    $stmt = $conn->prepare('UPDATE User SET User_Password=? WHERE User_ID=?');
-                    $stmt->bind_param('ss', $hashed, $userId);
-                    $stmt->execute();
-                    $stmt->close();
+                    $auth->updateUser($uid, [
+                        'password' => $newPw
+                    ]);
                 }
 
+                // Update business information if business seller
                 if ($isBusiness) {
-                    $stmt = $conn->prepare('UPDATE Business SET Bus_Name=?, Bus_TaxID=?, Bus_RegNum=?, Bus_Type=?, Bus_Phone=?, Bus_Address=? WHERE Bus_ID=?');
-                    $stmt->bind_param('sssssss', $busName, $busTaxID, $busRegNum, $busType, $busPhone, $busAddr, $user['Bus_ID']);
-                    $stmt->execute();
-                    $stmt->close();
+                    updateData("users/{$uid}/sellerData/business", [
+                        'name' => $busName,
+                        'taxId' => $busTaxID,
+                        'regNum' => $busRegNum,
+                        'regNumber' => $busRegNum,
+                        'type' => $busType,
+                        'phone' => $busPhone,
+                        'address' => $busAddr,
+                        'verified' => $business['verified'] ?? false
+                    ]);
                 }
 
-                $conn->commit();
                 $_SESSION['display_name'] = $fname;
                 $success = true;
 
-                // Refresh data
-                $stmt = $conn->prepare('
-                    SELECT u.*, s.Sell_ID, s.Sell_Type, s.Sell_Status, s.Sell_JoinDate,
-                           b.Bus_ID, b.Bus_Name, b.Bus_TaxID, b.Bus_RegNum, b.Bus_Type,
-                           b.Bus_Phone, b.Bus_Address, b.Bus_Verified
-                    FROM User u
-                    LEFT JOIN Seller s ON u.User_ID = s.Sell_UserID
-                    LEFT JOIN Business b ON s.Sell_ID = b.Bus_SellID
-                    WHERE u.User_ID = ?
-                ');
-                $stmt->bind_param('s', $userId);
-                $stmt->execute();
-                $user = $stmt->get_result()->fetch_assoc();
-                $stmt->close();
+                // Reload user data
+                $user = getData("users/{$uid}");
+                $profile = $user['profile'] ?? [];
+                $sellerData = $user['sellerData'] ?? [];
+                $business = $sellerData['business'] ?? [];
 
             } catch (Exception $e) {
-                $conn->rollback();
-                $errors[] = 'Failed to save changes. Please try again.';
+                $errors[] = 'Failed to save changes: ' . $e->getMessage();
             }
         }
     }
 }
-
-$conn->close();
 
 $title    = 'Edit Seller Profile';
 $basePath = '../';
@@ -347,36 +346,36 @@ include('../layout/layout.php');
             <div class="form-row">
                 <div class="form-group">
                     <label for="fname">First Name</label>
-                    <input type="text" id="fname" name="fname" value="<?= htmlspecialchars($user['User_FName']) ?>" required>
+                    <input type="text" id="fname" name="fname" value="<?= htmlspecialchars($profile['firstName'] ?? '') ?>" required>
                 </div>
                 <div class="form-group">
                     <label for="lname">Last Name</label>
-                    <input type="text" id="lname" name="lname" value="<?= htmlspecialchars($user['User_LName']) ?>" required>
+                    <input type="text" id="lname" name="lname" value="<?= htmlspecialchars($profile['lastName'] ?? '') ?>" required>
                 </div>
             </div>
 
             <div class="form-row">
                 <div class="form-group">
                     <label for="accname">Username</label>
-                    <input type="text" id="accname" name="accname" value="<?= htmlspecialchars($user['User_AccName']) ?>" required>
+                    <input type="text" id="accname" name="accname" value="<?= htmlspecialchars($profile['accountName'] ?? '') ?>" required>
                 </div>
                 <div class="form-group">
                     <label for="email">Email Address</label>
-                    <input type="email" id="email" name="email" value="<?= htmlspecialchars($user['User_Email']) ?>" required>
+                    <input type="email" id="email" name="email" value="<?= htmlspecialchars($profile['email'] ?? '') ?>" required>
                 </div>
             </div>
 
             <div class="form-row">
                 <div class="form-group">
                     <label for="contact">Contact Number</label>
-                    <input type="tel" id="contact" name="contact" value="<?= htmlspecialchars($user['User_Contact']) ?>" placeholder="09XXXXXXXXX" maxlength="11" required>
+                    <input type="tel" id="contact" name="contact" value="<?= htmlspecialchars($profile['contact'] ?? '') ?>" placeholder="09XXXXXXXXX" maxlength="11" required>
                 </div>
             </div>
 
             <div class="form-row full">
                 <div class="form-group">
                     <label for="address">Address</label>
-                    <textarea id="address" name="address" required><?= htmlspecialchars($user['User_Address']) ?></textarea>
+                    <textarea id="address" name="address" required><?= htmlspecialchars($profile['address'] ?? '') ?></textarea>
                 </div>
             </div>
         </div>
@@ -389,7 +388,7 @@ include('../layout/layout.php');
                 Business Information
             </div>
 
-            <?php if ($user['Bus_Verified']): ?>
+            <?php if ($business['verified'] ?? false): ?>
                 <div class="alert alert-success" style="margin-bottom:16px;">
                     <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
                     Your business is verified. Tax ID and registration number are locked.
@@ -399,7 +398,7 @@ include('../layout/layout.php');
             <div class="form-row full">
                 <div class="form-group">
                     <label for="bus_name">Business Name</label>
-                    <input type="text" id="bus_name" name="bus_name" value="<?= htmlspecialchars($user['Bus_Name'] ?? '') ?>" required>
+                    <input type="text" id="bus_name" name="bus_name" value="<?= htmlspecialchars($business['name'] ?? '') ?>" required>
                 </div>
             </div>
 
@@ -407,21 +406,21 @@ include('../layout/layout.php');
                 <div class="form-group">
                     <label for="bus_taxid">Tax ID (TIN)</label>
                     <input type="text" id="bus_taxid" name="bus_taxid"
-                           value="<?= htmlspecialchars($user['Bus_TaxID'] ?? '') ?>"
-                           <?= $user['Bus_Verified'] ? 'disabled' : 'required' ?>>
+                           value="<?= htmlspecialchars($business['taxId'] ?? '') ?>"
+                           <?= ($business['verified'] ?? false) ? 'disabled' : 'required' ?>>
                 </div>
                 <div class="form-group">
                     <label for="bus_regnum">Registration Number</label>
                     <input type="text" id="bus_regnum" name="bus_regnum"
-                           value="<?= htmlspecialchars($user['Bus_RegNum'] ?? '') ?>"
-                           <?= $user['Bus_Verified'] ? 'disabled' : 'required' ?>>
+                           value="<?= htmlspecialchars($business['regNumber'] ?? $business['regNum'] ?? '') ?>"
+                           <?= ($business['verified'] ?? false) ? 'disabled' : 'required' ?>>
                 </div>
             </div>
 
-            <?php if ($user['Bus_Verified']): ?>
+            <?php if ($business['verified'] ?? false): ?>
                 <!-- Keep hidden values so server receives them -->
-                <input type="hidden" name="bus_taxid" value="<?= htmlspecialchars($user['Bus_TaxID'] ?? '') ?>">
-                <input type="hidden" name="bus_regnum" value="<?= htmlspecialchars($user['Bus_RegNum'] ?? '') ?>">
+                <input type="hidden" name="bus_taxid" value="<?= htmlspecialchars($business['taxId'] ?? '') ?>">
+                <input type="hidden" name="bus_regnum" value="<?= htmlspecialchars($business['regNumber'] ?? $business['regNum'] ?? '') ?>">
                 <p class="readonly-note">
                     <svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                     Tax ID and registration number are locked after verification.
@@ -431,18 +430,18 @@ include('../layout/layout.php');
             <div class="form-row" style="margin-top:16px;">
                 <div class="form-group">
                     <label for="bus_type">Business Type</label>
-                    <input type="text" id="bus_type" name="bus_type" value="<?= htmlspecialchars($user['Bus_Type'] ?? '') ?>" placeholder="e.g. Corporation, Sole Proprietorship" required>
+                    <input type="text" id="bus_type" name="bus_type" value="<?= htmlspecialchars($business['type'] ?? '') ?>" placeholder="e.g. Corporation, Sole Proprietorship" required>
                 </div>
                 <div class="form-group">
                     <label for="bus_phone">Business Phone</label>
-                    <input type="tel" id="bus_phone" name="bus_phone" value="<?= htmlspecialchars($user['Bus_Phone'] ?? '') ?>" placeholder="09XXXXXXXXX" maxlength="11" required>
+                    <input type="tel" id="bus_phone" name="bus_phone" value="<?= htmlspecialchars($business['phone'] ?? '') ?>" placeholder="09XXXXXXXXX" maxlength="11" required>
                 </div>
             </div>
 
             <div class="form-row full">
                 <div class="form-group">
                     <label for="bus_address">Business Address</label>
-                    <textarea id="bus_address" name="bus_address" required><?= htmlspecialchars($user['Bus_Address'] ?? '') ?></textarea>
+                    <textarea id="bus_address" name="bus_address" required><?= htmlspecialchars($business['address'] ?? '') ?></textarea>
                 </div>
             </div>
         </div>
@@ -458,11 +457,11 @@ include('../layout/layout.php');
             <div class="form-row">
                 <div class="form-group">
                     <label>Seller Type</label>
-                    <input type="text" value="<?= htmlspecialchars(ucfirst($user['Sell_Type'] ?? '')) ?>" disabled>
+                    <input type="text" value="<?= htmlspecialchars(ucfirst($sellerData['type'] ?? '')) ?>" disabled>
                 </div>
                 <div class="form-group">
                     <label>Seller Status</label>
-                    <input type="text" value="<?= htmlspecialchars($user['Sell_Status'] ?? '') ?>" disabled>
+                    <input type="text" value="<?= htmlspecialchars($sellerData['status'] ?? '') ?>" disabled>
                 </div>
             </div>
 

@@ -1,22 +1,10 @@
 <?php
 require_once "includes/auth.php";
 requireAdminLogin();
-require_once "../config/db.php";
+require_once "../config/firebase.php";
 
 $message = '';
 $messageType = '';
-
-// Helper function to generate ID
-function genID($prefix, $conn, $table, $col) {
-    do {
-        $id = $prefix . strtoupper(substr(md5(uniqid()), 0, 6));
-        $check = $conn->prepare("SELECT 1 FROM $table WHERE $col = ? LIMIT 1");
-        $check->bind_param("s", $id);
-        $check->execute();
-        $result = $check->get_result();
-    } while ($result && $result->num_rows > 0);
-    return $id;
-}
 
 // Delete admin account (Level 3 only, cannot delete self)
 if (isset($_GET['delete']) && isset($_GET['id'])) {
@@ -28,33 +16,23 @@ if (isset($_GET['delete']) && isset($_GET['id'])) {
         $message = "You cannot delete your own admin account!";
         $messageType = "danger";
     } else {
-        // Get the user ID associated with this admin
-        $getUser = $conn->prepare("SELECT Admin_UserID FROM Admin WHERE Admin_ID = ?");
-        $getUser->bind_param("s", $adminToDelete);
-        $getUser->execute();
-        $userResult = $getUser->get_result();
+        // Get the admin data
+        $adminData = getData("admins/{$adminToDelete}");
         
-        if ($userResult->num_rows > 0) {
-            $userData = $userResult->fetch_assoc();
-            $userId = $userData['Admin_UserID'];
+        if ($adminData) {
+            $userId = $adminData['userId'] ?? '';
             
-            $conn->begin_transaction();
             try {
-                // Delete from Admin table first
-                $deleteAdmin = $conn->prepare("DELETE FROM Admin WHERE Admin_ID = ?");
-                $deleteAdmin->bind_param("s", $adminToDelete);
-                $deleteAdmin->execute();
+                // Delete from Firebase Auth
+                $auth->deleteUser($userId);
                 
-                // Delete from User table
-                $deleteUser = $conn->prepare("DELETE FROM User WHERE User_ID = ?");
-                $deleteUser->bind_param("s", $userId);
-                $deleteUser->execute();
+                // Delete from Firebase Realtime Database
+                deleteData("admins/{$adminToDelete}");
+                deleteData("users/{$userId}");
                 
-                $conn->commit();
                 $message = "Admin account deleted successfully!";
                 $messageType = "success";
-            } catch (Exception $e) {
-                $conn->rollback();
+            } catch (\Exception $e) {
                 $message = "Failed to delete admin: " . $e->getMessage();
                 $messageType = "danger";
             }
@@ -99,72 +77,72 @@ if (isset($_POST['add_admin'])) {
         $message = "Admin level must be between 1 and 3.";
         $messageType = "danger";
     } else {
-        // Check if email already exists
-        $checkEmail = $conn->prepare("SELECT 1 FROM User WHERE User_Email = ? LIMIT 1");
-        $checkEmail->bind_param("s", $email);
-        $checkEmail->execute();
-        
-        if ($checkEmail->get_result()->num_rows > 0) {
+        try {
+            // Check if email already exists in Firebase Auth
+            $auth->getUserByEmail($email);
             $message = "Email already exists. Please use a different email.";
             $messageType = "danger";
-        } else {
-            // Check if username already exists
-            $checkUser = $conn->prepare("SELECT 1 FROM User WHERE User_AccName = ? LIMIT 1");
-            $checkUser->bind_param("s", $username);
-            $checkUser->execute();
+        } catch (\Exception $e) {
+            // Email doesn't exist, check username in Firebase Realtime Database
+            $allUsers = getData('users');
+            $usernameTaken = false;
+            if ($allUsers) {
+                foreach ($allUsers as $uid => $userData) {
+                    $profile = $userData['profile'] ?? [];
+                    if (isset($profile['accountName']) && strtolower($profile['accountName']) === strtolower($username)) {
+                        $usernameTaken = true;
+                        break;
+                    }
+                }
+            }
             
-            if ($checkUser->get_result()->num_rows > 0) {
+            if ($usernameTaken) {
                 $message = "Username already taken. Please choose another.";
                 $messageType = "danger";
             } else {
-                $hashed = password_hash($password, PASSWORD_BCRYPT);
-                $today  = date('Y-m-d');
-
-                // Sequential USER ID
-                $uid = 'USER0001';
-                $res = $conn->query("SELECT User_ID FROM User WHERE User_ID LIKE 'USER%' ORDER BY User_ID DESC LIMIT 1");
-                if ($res && $row = $res->fetch_assoc()) {
-                    if (preg_match('/^USER(\d+)$/', $row['User_ID'], $m)) {
-                        $uid = sprintf("USER%04d", intval($m[1]) + 1);
-                    }
-                }
-
-                // Sequential ADMN ID
-                $aid = 'ADMN0001';
-                $res = $conn->query("SELECT Admin_ID FROM Admin WHERE Admin_ID LIKE 'ADMN%' ORDER BY Admin_ID DESC LIMIT 1");
-                if ($res && $row = $res->fetch_assoc()) {
-                    if (preg_match('/^ADMN(\d+)$/', $row['Admin_ID'], $m)) {
-                        $aid = sprintf("ADMN%04d", intval($m[1]) + 1);
-                    }
-                }
-
-                $conn->begin_transaction();
                 try {
-                    $insertUser = $conn->prepare("
-                        INSERT INTO User (User_ID, User_FName, User_LName, User_AccName, User_Email,
-                                         User_Password, User_Contact, User_Address, User_DateReg, User_AccType, User_Status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin', 'active')
-                    ");
-                    $insertUser->bind_param("sssssssss", $uid, $fname, $lname, $username, $email,
-                                           $hashed, $contact, $address, $today);
-                    $insertUser->execute();
-
-                    $insertAdmin = $conn->prepare("
-                        INSERT INTO Admin (Admin_ID, Admin_UserID, Admin_Level, Admin_Perm, Admin_LastLog)
-                        VALUES (?, ?, ?, ?, NULL)
-                    ");
-                    $insertAdmin->bind_param("ssis", $aid, $uid, $adminLevel, $adminPerm);
-                    $insertAdmin->execute();
+                    $today = date('Y-m-d');
                     
-                    $conn->commit();
+                    // Create user in Firebase Auth
+                    $user = $auth->createUser([
+                        'email' => $email,
+                        'password' => $password,
+                        'displayName' => $fname . ' ' . $lname
+                    ]);
+                    
+                    $uid = $user->uid;
+                    $adminId = generateId('ADMN');
+                    
+                    // Create user in Firebase Realtime Database
+                    setData("users/{$uid}", [
+                        'accountType' => 'admin',
+                        'dateRegistered' => $today,
+                        'status' => 'active',
+                        'profile' => [
+                            'firstName' => $fname,
+                            'lastName' => $lname,
+                            'accountName' => $username,
+                            'email' => $email,
+                            'contact' => $contact,
+                            'address' => $address
+                        ]
+                    ]);
+                    
+                    // Create admin record in Firebase Realtime Database
+                    setData("admins/{$adminId}", [
+                        'userId' => $uid,
+                        'level' => $adminLevel,
+                        'permissions' => $adminPerm,
+                        'lastLogin' => null
+                    ]);
+                    
                     $message = "Admin account created successfully!";
                     $messageType = "success";
                     
                     // Clear form
                     $_POST = [];
                     
-                } catch (Exception $e) {
-                    $conn->rollback();
+                } catch (\Exception $e) {
                     $message = "Failed to create admin account: " . $e->getMessage();
                     $messageType = "danger";
                 }
@@ -174,12 +152,37 @@ if (isset($_POST['add_admin'])) {
 }
 
 // Get all existing admins
-$adminsQuery = $conn->query("
-    SELECT a.*, u.User_FName, u.User_LName, u.User_Email, u.User_AccName, u.User_Status
-    FROM Admin a
-    JOIN User u ON a.Admin_UserID = u.User_ID
-    ORDER BY a.Admin_Level DESC, u.User_FName ASC
-");
+$admins = [];
+$adminsData = getData('admins');
+if ($adminsData) {
+    foreach ($adminsData as $adminId => $adminData) {
+        $userId = $adminData['userId'] ?? '';
+        $userData = getData("users/{$userId}");
+        if ($userData) {
+            $profile = $userData['profile'] ?? [];
+            $admins[] = [
+                'Admin_ID' => $adminId,
+                'Admin_UserID' => $userId,
+                'Admin_Level' => $adminData['level'] ?? 1,
+                'Admin_Perm' => $adminData['permissions'] ?? '',
+                'Admin_LastLog' => $adminData['lastLogin'] ?? null,
+                'User_FName' => $profile['firstName'] ?? '',
+                'User_LName' => $profile['lastName'] ?? '',
+                'User_Email' => $profile['email'] ?? '',
+                'User_AccName' => $profile['accountName'] ?? '',
+                'User_Status' => $userData['status'] ?? 'active'
+            ];
+        }
+    }
+}
+
+// Sort by level descending, then by name
+usort($admins, function($a, $b) {
+    if ($a['Admin_Level'] != $b['Admin_Level']) {
+        return $b['Admin_Level'] - $a['Admin_Level'];
+    }
+    return strcmp($a['User_FName'], $b['User_FName']);
+});
 
 $title = "Add Admin - eBay Admin";
 ?>
@@ -236,12 +239,6 @@ $title = "Add Admin - eBay Admin";
             </a>
             <a href="products.php" class="nav-link-custom d-block">
                 <i class="bi bi-box"></i> Products
-            </a>
-            <a href="categories.php" class="nav-link-custom d-block">
-                <i class="bi bi-tags"></i> Categories
-            </a>
-            <a href="couriers.php" class="nav-link-custom d-block">
-                <i class="bi bi-truck"></i> Couriers
             </a>
             <a href="orders.php" class="nav-link-custom d-block">
                 <i class="bi bi-receipt"></i> Orders
@@ -357,8 +354,8 @@ $title = "Add Admin - eBay Admin";
                         </tr>
                     </thead>
                     <tbody>
-                        <?php if ($adminsQuery && $adminsQuery->num_rows > 0): ?>
-                            <?php while ($admin = $adminsQuery->fetch_assoc()): ?>
+                        <?php if (!empty($admins)): ?>
+                            <?php foreach ($admins as $admin): ?>
                                 <tr>
                                     <td><?= htmlspecialchars($admin['User_FName'] . ' ' . $admin['User_LName']) ?></td>
                                     <td>@<?= htmlspecialchars($admin['User_AccName']) ?></td>
@@ -396,7 +393,7 @@ $title = "Add Admin - eBay Admin";
                                         </div>
                                     </td>
                                 </tr>
-                            <?php endwhile; ?>
+                            <?php endforeach; ?>
                         <?php else: ?>
                             <tr>
                                 <td colspan="8" class="text-center text-muted py-4">

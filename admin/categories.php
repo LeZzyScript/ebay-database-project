@@ -1,64 +1,71 @@
 <?php
 require_once "includes/auth.php";
 requireAdminLogin();
-require_once "../config/db.php";
+require_once "../config/firebase.php";
 
 $message = '';
 $messageType = '';
 
 // Delete Category
 if (isset($_GET['delete']) && isset($_GET['id'])) {
-    $cid = $conn->real_escape_string($_GET['id']);
-    if ($conn->query("DELETE FROM Category WHERE Cat_ID = '$cid'")) {
-        $message = "Category deleted successfully!";
-        $messageType = "success";
-    } else {
-        $message = "Failed to delete category.";
-        $messageType = "danger";
-    }
+    $cid = $_GET['id'];
+    deleteData("categories/{$cid}");
+    $message = "Category deleted successfully!";
+    $messageType = "success";
 }
 
 // Add/Edit Category (POST)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $name = $conn->real_escape_string(trim($_POST['cat_name']));
-    $desc = $conn->real_escape_string(trim($_POST['cat_desc']));
-    $icon = $conn->real_escape_string(trim($_POST['cat_icon']));
-    $status = $conn->real_escape_string($_POST['cat_status']);
+    $name = trim($_POST['cat_name']);
+    $desc = trim($_POST['cat_desc']);
+    $icon = trim($_POST['cat_icon']);
+    $status = $_POST['cat_status'];
 
     if (isset($_POST['cat_id']) && !empty($_POST['cat_id'])) {
         // Edit
-        $cid = $conn->real_escape_string($_POST['cat_id']);
-        $sql = "UPDATE Category SET Cat_Name='$name', Cat_Description='$desc', Cat_Icon='$icon', Cat_Status='$status' WHERE Cat_ID='$cid'";
-        if ($conn->query($sql)) {
-            $message = "Category updated successfully!";
-            $messageType = "success";
-        } else {
-            $message = "Failed to update category.";
-            $messageType = "danger";
-        }
+        $cid = $_POST['cat_id'];
+        updateData("categories/{$cid}", [
+            'name' => $name,
+            'description' => $desc,
+            'icon' => $icon,
+            'status' => $status
+        ]);
+        $message = "Category updated successfully!";
+        $messageType = "success";
     } else {
         // Add
-        // Generate Cat_ID (CATG + 4 digits)
-        $catId = 'CATG0001';
-        $res = $conn->query("SELECT Cat_ID FROM Category ORDER BY Cat_ID DESC LIMIT 1");
-        if ($res && $row = $res->fetch_assoc()) {
-            if (preg_match('/^CATG(\d{4})$/', $row['Cat_ID'], $matches)) {
-                $nextNum = intval($matches[1]) + 1;
-                $catId = sprintf("CATG%04d", $nextNum);
-            }
-        }
-        $sql = "INSERT INTO Category (Cat_ID, Cat_Name, Cat_Description, Cat_Icon, Cat_Status) VALUES ('$catId', '$name', '$desc', '$icon', '$status')";
-        if ($conn->query($sql)) {
-            $message = "Category created successfully!";
-            $messageType = "success";
-        } else {
-            $message = "Failed to create category.";
-            $messageType = "danger";
-        }
+        $catId = generateId('CATG');
+        setData("categories/{$catId}", [
+            'name' => $name,
+            'description' => $desc,
+            'icon' => $icon,
+            'status' => $status
+        ]);
+        $message = "Category created successfully!";
+        $messageType = "success";
     }
 }
 
-$categories = $conn->query("SELECT * FROM Category ORDER BY Cat_Name ASC");
+// Fetch all categories
+$categories = [];
+$categoriesData = getData('categories');
+if ($categoriesData) {
+    foreach ($categoriesData as $catId => $catData) {
+        $categories[] = [
+            'Cat_ID' => $catId,
+            'Cat_Name' => $catData['name'] ?? '',
+            'Cat_Description' => $catData['description'] ?? '',
+            'Cat_Icon' => $catData['icon'] ?? 'bi-tag',
+            'Cat_Status' => $catData['status'] ?? 'active'
+        ];
+    }
+}
+
+// Sort by name
+usort($categories, function($a, $b) {
+    return strcmp($a['Cat_Name'], $b['Cat_Name']);
+});
+
 $title = "Category Management";
 ?>
 <!DOCTYPE html>
@@ -97,13 +104,32 @@ $title = "Category Management";
             <small class="d-block mt-1">Admin Control Panel</small>
         </div>
         <div class="mt-3">
-            <a href="dashboard.php" class="nav-link-custom d-block"><i class="bi bi-speedometer2"></i> Dashboard</a>
-            <a href="users.php" class="nav-link-custom d-block"><i class="bi bi-people"></i> User Management</a>
-            <a href="sellers.php" class="nav-link-custom d-block"><i class="bi bi-building"></i> Sellers</a>
-            <a href="products.php" class="nav-link-custom d-block"><i class="bi bi-box"></i> Products</a>
-            <a href="categories.php" class="nav-link-custom d-block active"><i class="bi bi-tags"></i> Categories</a>
-            <a href="couriers.php" class="nav-link-custom d-block"><i class="bi bi-truck"></i> Couriers</a>
-            <a href="orders.php" class="nav-link-custom d-block"><i class="bi bi-receipt"></i> Orders</a>
+            <a href="dashboard.php" class="nav-link-custom d-block">
+                <i class="bi bi-speedometer2"></i> Dashboard
+            </a>
+            <a href="users.php" class="nav-link-custom d-block">
+                <i class="bi bi-people"></i> User Management
+            </a>
+            <a href="add_admin.php" class="nav-link-custom d-block">
+                <i class="bi bi-person-badge"></i> Add Admin
+            </a>
+            <a href="sellers.php" class="nav-link-custom d-block">
+                <i class="bi bi-building"></i> Sellers & Verification
+            </a>
+            <a href="products.php" class="nav-link-custom d-block">
+                <i class="bi bi-box"></i> Products
+            </a>
+            <a href="categories.php" class="nav-link-custom d-block active">
+                <i class="bi bi-tags"></i> Categories
+            </a>
+
+            <a href="orders.php" class="nav-link-custom d-block">
+                <i class="bi bi-receipt"></i> Orders
+            </a>
+            <hr class="mx-3 my-3" style="border-color:rgba(255,255,255,0.1)">
+            <a href="../auth/logout.php" class="nav-link-custom d-block">
+                <i class="bi bi-box-arrow-right"></i> Logout
+            </a>
         </div>
     </div>
 
@@ -139,8 +165,8 @@ $title = "Category Management";
                         <tr><th>Icon</th><th>ID</th><th>Name</th><th>Description</th><th>Status</th><th>Actions</th></tr>
                     </thead>
                     <tbody>
-                        <?php if ($categories && $categories->num_rows > 0): ?>
-                            <?php while ($cat = $categories->fetch_assoc()): ?>
+                        <?php if (!empty($categories)): ?>
+                            <?php foreach ($categories as $cat): ?>
                                 <tr>
                                     <td><i class="bi <?= htmlspecialchars($cat['Cat_Icon']) ?> fs-5 text-primary"></i></td>
                                     <td><code><?= $cat['Cat_ID'] ?></code></td>
@@ -158,7 +184,7 @@ $title = "Category Management";
                                         </div>
                                     </td>
                                 </tr>
-                            <?php endwhile; ?>
+                            <?php endforeach; ?>
                         <?php else: ?>
                             <tr><td colspan="6" class="text-center text-muted py-4">No categories found.</td></tr>
                         <?php endif; ?>

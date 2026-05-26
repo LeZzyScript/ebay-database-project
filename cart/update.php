@@ -8,14 +8,14 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-if (!isset($_SESSION['account_id'])) {
+if (!isset($_SESSION['firebase_uid'])) {
     echo json_encode(['success' => false, 'message' => 'Not logged in']);
     exit;
 }
 
-require_once('../config/db.php');
+require_once('../config/firebase.php');
 
-$userId = $_SESSION['account_id'];
+$uid = $_SESSION['firebase_uid'];
 $prodId = trim($_POST['prod_id'] ?? '');
 $qty    = intval($_POST['qty'] ?? 0);
 
@@ -26,47 +26,38 @@ if (!$prodId) {
 
 // qty <= 0 means remove
 if ($qty <= 0) {
-    $stmt = $conn->prepare("DELETE FROM Cart WHERE Cart_UserID = ? AND Cart_ProdID = ?");
-    $stmt->bind_param("ss", $userId, $prodId);
-    $stmt->execute();
-    $stmt->close();
+    deleteData("carts/{$uid}/items/{$prodId}");
 } else {
     // Check stock limit
-    $stockStmt = $conn->prepare("SELECT Prod_Stock FROM Product WHERE Prod_ID = ?");
-    $stockStmt->bind_param("s", $prodId);
-    $stockStmt->execute();
-    $stockRow = $stockStmt->get_result()->fetch_assoc();
-    $stockStmt->close();
+    $product = getData("products/{$prodId}");
 
-    if (!$stockRow) {
+    if (!$product) {
         echo json_encode(['success' => false, 'message' => 'Product not found']);
         exit;
     }
 
-    $qty = min($qty, $stockRow['Prod_Stock']);
+    $qty = min($qty, $product['stock'] ?? 0);
     $today = date('Y-m-d');
 
-    $stmt = $conn->prepare("UPDATE Cart SET Cart_Qty = ?, Cart_DateUpd = ? WHERE Cart_UserID = ? AND Cart_ProdID = ?");
-    $stmt->bind_param("isss", $qty, $today, $userId, $prodId);
-    if (!$stmt->execute()) {
-        echo json_encode(['success' => false, 'message' => 'Failed to update cart']);
-        $stmt->close();
-        exit;
-    }
-    $stmt->close();
+    updateData("carts/{$uid}/items/{$prodId}", [
+        'quantity' => $qty,
+        'dateUpdated' => $today
+    ]);
 }
 
 // Refresh session cart count
-$stmt2 = $conn->prepare("SELECT COALESCE(SUM(Cart_Qty), 0) AS total FROM Cart WHERE Cart_UserID = ?");
-$stmt2->bind_param("s", $userId);
-$stmt2->execute();
-$countRow = $stmt2->get_result()->fetch_assoc();
-$stmt2->close();
+$cartItems = getData("carts/{$uid}/items");
+$cartCount = 0;
+if ($cartItems) {
+    foreach ($cartItems as $item) {
+        $cartCount += ($item['quantity'] ?? 0);
+    }
+}
 
-$_SESSION['cart_count'] = (int)$countRow['total'];
+$_SESSION['cart_count'] = $cartCount;
 
 echo json_encode([
     'success'    => true,
-    'cart_count' => $_SESSION['cart_count'],
+    'cart_count' => $cartCount,
     'new_qty'    => $qty,
 ]);

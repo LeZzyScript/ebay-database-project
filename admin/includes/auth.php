@@ -3,7 +3,7 @@
 session_start();
 
 function isAdminLoggedIn() {
-    return isset($_SESSION['account_id']) && 
+    return isset($_SESSION['firebase_uid']) && 
            isset($_SESSION['is_admin']) && 
            $_SESSION['is_admin'] === true;
 }
